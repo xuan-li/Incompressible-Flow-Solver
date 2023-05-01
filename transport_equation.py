@@ -7,22 +7,23 @@ import matplotlib.pyplot as plt
 ti.init(arch=ti.gpu, default_fp=ti.f32)
 
 argparser = argparse.ArgumentParser()
-argparser.add_argument('--nx', type=int, default=100)
+argparser.add_argument('--dt', type=float, default=0.01)
 argparser.add_argument('--scheme', type=str, default='central')
 argparser.add_argument('--T', type=float, default=1)
 
 args = argparser.parse_args()
-nx = args.nx
-dx = 1 / nx
+T = float(args.T)
+dt = float(args.dt)
 c = 1
 
 if args.scheme == 'central':
     type=0
-    nt = int(1/dx ** 2) + 1
+    nx = int(2 / np.sqrt(dt))
 elif args.scheme == 'upwind':
     type=1
-    nt = int(1/dx) + 1
-dt_max = 1 / nt
+    nx = int(0.5 / (c * dt))
+
+dx = 1 / nx
 
 f_in = ti.field(dtype=float, shape=(nx+1))
 f_out = ti.field(dtype=float, shape=(nx+1))
@@ -73,35 +74,30 @@ assign_initial_value()
 plt.plot(np.arange(0, 1+0.5*dx, dx),f_in.to_numpy(), linestyle='-', label='T=0', linewidth=3)
 
 t = 0
-T = float(args.T)
 while t < T:
-    if T - t < dt_max:
+    if t + dt > T:
         timestep(T - t)
-        t = T
     else:
-        timestep(dt_max)
-        t += dt_max
-    if abs(t - T/2) < dt_max/2:
+        timestep(dt)
+    t += dt
+    if abs(t - T / 2) < 0.5 * dt:
         plt.plot(np.arange(0, 1+0.5*dx, dx),f_in.to_numpy(), linestyle='--', label=f't={T/2}', linewidth=3)
 
 plt.plot(np.arange(0, 1+0.5*dx, dx),f_in.to_numpy(), linestyle='-.', label=f't={T}', linewidth=3)
 plt.legend()
+plt.xlabel('x')
+plt.ylabel('f')
+plt.title(f"Transport Equation, scheme={args.scheme}, dt={dt}")
 
 exact_solution(T)
 compute_error()
 
 print("========== INFO ============")
 print(f"dx = {dx}")
-print(f"dt = {dt_max}")
+print(f"dt = {dt}")
 print(f"T = {T}")
 print(f"scheme = {args.scheme}")
 print(f"error(T) = {error[None]}")
 print("============================")
 
 plt.show()
-
-
-# grid = f_out.to_numpy()
-# import matplotlib.pyplot as plt
-# plt.plot(np.arange(0, 1+0.5*dx, dx),grid)
-# plt.show()
