@@ -20,6 +20,10 @@ class ImcompressibleFlowSimulation:
         self.div_v = ti.field(dtype=float, shape=(nx, ny))
         self.laplacian_vx = ti.field(dtype=float, shape=(nx+1, ny))
         self.laplacian_vy = ti.field(dtype=float, shape=(nx, ny+1))
+        self.advect_vx = ti.field(dtype=float, shape=(nx+1, ny))
+        self.advect_vy = ti.field(dtype=float, shape=(nx, ny+1))
+        self.advect_vx_prev = ti.field(dtype=float, shape=(nx+1, ny))
+        self.advect_vy_prev = ti.field(dtype=float, shape=(nx, ny+1))
         self.vL = ti.Vector.field(2, float, shape=())
         self.vR = ti.Vector.field(2, float, shape=())
         self.vT = ti.Vector.field(2, float, shape=())
@@ -37,7 +41,6 @@ class ImcompressibleFlowSimulation:
 
     @ti.kernel
     def set_wall_vel(self, vL:ti.types.ndarray(), vR:ti.types.ndarray(), vB:ti.types.ndarray(), vT:ti.types.ndarray()):
-        # components = [u_l, u_r, u_b, u_t]
         self.vL[None] = [vL[0], vL[1]]
         self.vR[None] = [vR[0], vR[1]]
         self.vB[None] = [vB[0], vB[1]]
@@ -52,8 +55,6 @@ class ImcompressibleFlowSimulation:
         for i in range(self.nx):
             self.vy[i, 0] = vB [1]
             self.vy[i, self.ny] = vT[1]
-        
-
         
     
     @ti.kernel
@@ -129,43 +130,99 @@ class ImcompressibleFlowSimulation:
                 continue
             vxl = self.vx[I[0]-1, I[1]]
             vxr = self.vx[I[0]+1, I[1]]
-            vxb = 0
+            vxb = ti.cast(0, float)
             if I[1] == 0:
-                vxb = self.vB[None][0]
+                vxb = 2 * self.vB[None][0] - self.vx[I]
             else:
                 vxb = self.vx[I[0], I[1]-1]
-            vxt = 0
+            vxt = ti.cast(0, float)
             if I[1] == self.ny-1:
-                vxt = self.vT[None][0]
+                vxt = 2 * self.vT[None][0] - self.vx[I]
             else:
                 vxt = self.vx[I[0], I[1]+1]
-
-            self.laplacian_vx[I] = (vxr - 2 * self.vx[I] + vxl) / (self.dx ** 2) \
-                                    + (vxt - 2 * self.vx[I] + vxb) / (self.dy ** 2)
+            self.laplacian_vx[I] = (vxr - 2 * self.vx[I] + vxl) / (self.dx ** 2) + (vxt - 2 * self.vx[I] + vxb) / (self.dy ** 2)
         
         for I in ti.grouped(self.laplacian_vy):
             if I[1] == 0 or I[1] == self.ny:
                 continue
             vyb = self.vy[I[0], I[1]-1]
             vyt = self.vy[I[0], I[1]+1]
-            vyl = 0
+            vyl = ti.cast(0, float)
+            if I[0] == 0:
+                vyl = 2 * self.vL[None][1] - self.vy[I]
+            else:
+                vyl = self.vy[I[0]-1, I[1]]
+            vyr = ti.cast(0, float)
+            if I[0] == self.nx - 1:
+                vyr = 2 * self.vR[None][1] - self.vy[I]
+            else:
+                vyr = self.vy[I[0]+1, I[1]]
+            self.laplacian_vy[I] = (vyr - 2 * self.vy[I] + vyl) / (self.dx ** 2) + (vyt - 2 * self.vy[I] + vyb) / (self.dx ** 2)
+
+    @ti.kernel
+    def compute_advection(self):
+        for I in ti.grouped(self.advect_vx):
+            if I[0] == 0 or I[0] == self.nx:
+                self.advect_vx[I] = 0
+                continue
+            vxl = 0.5 * (self.vx[I] + self.vx[I[0]-1, I[1]])
+            vxr = 0.5 * (self.vx[I] + self.vx[I[0]+1, I[1]])
+            vxb = ti.cast(0, float)
+            if I[1] == 0:
+                vxb = self.vB[None][0]
+            else:
+                vxb = 0.5 * (self.vx[I] + self.vx[I[0], I[1]-1])
+            vxt = ti.cast(0, float)
+            if I[1] == self.ny - 1:
+                vxt = self.vT[None][0]
+            else:
+                vxt = 0.5 * (self.vx[I] + self.vx[I[0], I[1]+1])
+            
+            vyb = ti.cast(0, float)
+            if I[1] == 0:
+                vyb = self.vB[None][1]
+            else:
+                vyb = 0.5 * (self.vy[I[0] - 1, I[1]] + self.vy[I])
+            vyt = ti.cast(0, float)
+            if I[1] == self.ny - 1:
+                vyt = self.vT[None][1]
+            else:
+                vyt = 0.5 * (self.vy[I[0]-1, I[1]+1] + self.vy[I[0], I[1]+1])
+            self.advect_vx[I] = (vxr ** 2 - vxl ** 2) / self.dx + (vxt * vyt - vxb * vyb) / self.dy
+        
+        for I in ti.grouped(self.advect_vy):
+            if I[1] == 0 or I[1] == self.ny:
+                self.advect_vy[I] = 0
+                continue
+            vyb = 0.5 * (self.vy[I] + self.vy[I[0], I[1]-1])
+            vyt = 0.5 * (self.vy[I] + self.vy[I[0], I[1]+1])
+            vyl = ti.cast(0, float)
             if I[0] == 0:
                 vyl = self.vL[None][1]
             else:
-                vyl = self.vy[I[0]-1, I[1]]
-            vyr = 0
+                vyl = 0.5 * (self.vy[I] + self.vy[I[0]-1, I[1]])
+            vyr = ti.cast(0, float)
             if I[0] == self.nx - 1:
                 vyr = self.vR[None][1]
             else:
-                vyr = self.vy[I[0]+1, I[1]]
+                vyr = 0.5 * (self.vy[I] + self.vy[I[0]+1, I[1]])
             
-            self.laplacian_vy[I] = (vyr - 2 * self.vy[I] + vyl) / (self.dx ** 2) \
-                                    + (vyt - 2 * self.vy[I] + vyb) / (self.dx ** 2)
+            vxl = ti.cast(0, float)
+            if I[0] == 0:
+                vxl = self.vL[None][0]
+            else:
+                vxl = 0.5 * (self.vx[I[0], I[1]] + self.vx[I[0], I[1]-1])
+            vxr = ti.cast(0, float)
+            if I[0] == self.nx - 1:
+                vxr = self.vR[None][0]
+            else:
+                vxr = 0.5 * (self.vx[I[0]+1, I[1]] + self.vx[I[0]+1, I[1]-1])
             
+            self.advect_vy[I] = (vyr * vxr - vyl * vxl) / self.dx + (vyt ** 2 - vyb ** 2) / self.dy
 
 
 if __name__ == '__main__':
-    ti.init(default_fp=ti.f32)
+    ti.init(default_fp=ti.f64)
     simulator = ImcompressibleFlowSimulation(1, 1, 64, 64)
     simulator.test_sample()
 

@@ -18,6 +18,8 @@ class DiscreteOperatorTester():
         self.error_div_v = ti.field(dtype=float, shape=())
         self.error_laplacian_vx = ti.field(dtype=float, shape=())
         self.error_laplacian_vy = ti.field(dtype=float, shape=())
+        self.error_advect_vx = ti.field(dtype=float, shape=())
+        self.error_advect_vy = ti.field(dtype=float, shape=())
 
     @ti.func
     def analytical_vx(self, x, y):
@@ -50,6 +52,14 @@ class DiscreteOperatorTester():
         laplacian_vx = -(mx * mx + my * my) * np.pi * np.pi * ti.sin(mx * np.pi * x) * ti.cos(my * np.pi * y)
         laplacian_vy = -(mx * mx + my * my) * np.pi * np.pi * ti.cos(mx * np.pi * x) * ti.sin(my * np.pi * y)
         return ti.Vector([laplacian_vx, laplacian_vy], float)
+
+    @ti.func
+    def analytical_advection(self, x, y):
+        duu_dx = np.pi * mx * ti.sin(2 * mx * np.pi * x) * (ti.cos(my * np.pi * y) ** 2)
+        duv_dy = 0.5 * np.pi * my * ti.sin(2 * mx * np.pi * x) * ti.cos(2 * my * np.pi * y)
+        duv_dx = 0.5 * np.pi * mx * ti.cos(2 * mx * np.pi * x) * ti.sin(2 * my * np.pi * y)
+        dvv_dy = np.pi * my * (ti.cos(mx * np.pi * x) ** 2) * ti.sin(2 * my * np.pi * y)
+        return ti.Vector([duu_dx + duv_dy, duv_dx + dvv_dy], float)
     
     @ti.kernel
     def fill_data(self):
@@ -96,60 +106,57 @@ class DiscreteOperatorTester():
             self.error_div_v[None] += (self.analytical_div_v(x, y) - self.simulator.div_v[I]) ** 2 * self.simulator.dx * self.simulator.dy
         
         for I in ti.grouped(self.simulator.laplacian_vx):
-            if I[0] == 0 or I[0] == self.simulator.nx:
+            if I[0] == 0 or I[0] == self.simulator.nx or I[1] == 0 or I[1] == self.simulator.ny-1:
                 continue
             x = I[0] * self.simulator.dx
             y = I[1] * self.simulator.dy + 0.5 * self.simulator.dy
             lap_vec = self.analytical_laplacian_v(x, y)
-            # self.error_laplacian_vx[None] += (lap_vec[0] - self.simulator.laplacian_vx[I]) ** 2 * self.simulator.dx * self.simulator.dy
-            x_l = x - self.simulator.dx
-            x_r = x + self.simulator.dx
-            y_b = y - self.simulator.dy
-            y_t = y + self.simulator.dy
-            numerical_laplacian_x = (self.analytical_vx(x_r, y) - 2 * self.analytical_vx(x, y) + self.analytical_vx(x_l, y)) / self.simulator.dx ** 2 \
-                + (self.analytical_vx(x, y_t) - 2 * self.analytical_vx(x, y) + self.analytical_vx(x, y_b)) / self.simulator.dy ** 2
-
-            self.error_laplacian_vx[None] += (numerical_laplacian_x - lap_vec[0]) ** 2 * self.simulator.dx * self.simulator.dy
+            self.error_laplacian_vx[None] += (lap_vec[0] - self.simulator.laplacian_vx[I]) ** 2 * self.simulator.dx * self.simulator.dy
+            if (lap_vec[0] - self.simulator.laplacian_vx[I]) ** 2 > 10:
+                print(I, self.simulator.vx[I])
         
-        # ti.loop_config(serialize=True)
         for I in ti.grouped(self.simulator.laplacian_vy):
-            if I[1] == 0 or I[1] == self.simulator.ny:
+            if I[1] == 0 or I[1] == self.simulator.ny or I[0] == 0 or I[0] == self.simulator.nx-1:
                 continue
             x = I[0] * self.simulator.dx + 0.5 * self.simulator.dx
             y = I[1] * self.simulator.dy
             lap_vec = self.analytical_laplacian_v(x, y)
-            # self.error_laplacian_vy[None] += (lap_vec[1] - self.simulator.laplacian_vy[I]) ** 2 * self.simulator.dx * self.simulator.dy
-
-            x_l = x - self.simulator.dx
-            x_r = x + self.simulator.dx
-            y_b = y - self.simulator.dy
-            y_t = y + self.simulator.dy
-            numerical_laplacian_y = (self.analytical_vy(x, y_t) - 2 * self.analytical_vy(x, y) + self.analytical_vy(x, y_b)) / self.simulator.dy ** 2 \
-                + (self.analytical_vy(x_r, y) - 2 * self.analytical_vy(x, y) + self.analytical_vy(x_l, y)) / self.simulator.dx ** 2
-            # print("Numerical laplacian: ", numerical_laplacian_x, " ", numerical_laplacian_y)
-            # print("Analytical laplacian: ", " ", lap_vec[0], lap_vec[1])
-            # print("Computed laplacian: ", self.simulator.laplacian_vx[I], " ", self.simulator.laplacian_vy[I])
-
-            self.error_laplacian_vy[None] += (lap_vec[1] - numerical_laplacian_y) ** 2 * self.simulator.dx * self.simulator.dy
-
+            self.error_laplacian_vy[None] += (lap_vec[1] - self.simulator.laplacian_vy[I]) ** 2 * self.simulator.dx * self.simulator.dy
+        
+        for I in ti.grouped(self.simulator.advect_vx):
+            if I[0] == 0 or I[0] == self.simulator.nx:
+                continue
+            x = I[0] * self.simulator.dx
+            y = I[1] * self.simulator.dy + 0.5 * self.simulator.dy
+            self.error_advect_vx[None] += (self.analytical_advection(x, y)[0] - self.simulator.advect_vx[I]) ** 2 * self.simulator.dx * self.simulator.dy
+        
+        for I in ti.grouped(self.simulator.advect_vy):
+            if I[1] == 0 or I[1] == self.simulator.ny:
+                continue
+            x = I[0] * self.simulator.dx + 0.5 * self.simulator.dx
+            y = I[1] * self.simulator.dy
+            self.error_advect_vy[None] += (self.analytical_advection(x, y)[1] - self.simulator.advect_vy[I]) ** 2 * self.simulator.dx * self.simulator.dy
 
         print("Error gradp_x: ", ti.sqrt(self.error_gradp_x[None]))
         print("Error gradp_y: ", ti.sqrt(self.error_gradp_y[None]))
         print("Error div_v: ", ti.sqrt(self.error_div_v[None]))
         print("Error laplacian_vx: ", ti.sqrt(self.error_laplacian_vx[None]))
         print("Error laplacian_vy: ", ti.sqrt(self.error_laplacian_vy[None]))
+        print("Error advect_vx: ", ti.sqrt(self.error_advect_vx[None]))
+        print("Error advect_vy: ", ti.sqrt(self.error_advect_vy[None]))
         
 
 
 
 if __name__ == '__main__':
-    ti.init(default_fp=ti.f32)
-    tester = DiscreteOperatorTester(1.0, 1.0, 10, 10)
+    ti.init(default_fp=ti.f64, arch=ti.cuda)
+    import sys
+    N = int(sys.argv[1])
+    tester = DiscreteOperatorTester(1.0, 1.0, N, N)
     tester.fill_data()
     tester.simulator.compute_div_v()
     tester.simulator.compute_gradp()
     tester.simulator.compute_laplacian_v()
+    tester.simulator.compute_advection()
     tester.compute_error()
-    import pdb
-    pdb.set_trace()
     
