@@ -37,14 +37,12 @@ class ImcompressibleFlowSimulation:
         self.num_pressure_dof = ti.field(dtype=int, shape=())
 
         self.label_dof()
-        L_builder = ti.linalg.SparseMatrixBuilder(self.num_vel_dof[None], self.num_vel_dof[None], self.num_vel_dof[None] * 6)
-        DG_builder = ti.linalg.SparseMatrixBuilder(self.num_pressure_dof[None], self.num_pressure_dof[None], self.nx * self.ny * 20)
-        self.fill_laplacian_matrix(L_builder)
-        self.L = L_builder.build()
-        self.fill_pressure_matrix(DG_builder)
-        self.DG = DG_builder.build()
-        self.DG.mmwrite("test.mtx")
-        import pdb; pdb.set_trace()
+        Lv_builder = ti.linalg.SparseMatrixBuilder(self.num_vel_dof[None], self.num_vel_dof[None], self.num_vel_dof[None] * 6)
+        Lp_builder = ti.linalg.SparseMatrixBuilder(self.num_pressure_dof[None], self.num_pressure_dof[None], self.num_pressure_dof[None] * 8)
+        self.fill_laplacian_matrix(Lv_builder)
+        self.Lv = Lv_builder.build()
+        self.fill_pressure_matrix(Lp_builder)
+        self.Lp = Lp_builder.build()
         self.advection_rhs = ti.ndarray(float, shape=(self.num_vel_dof[None]))
         self.pressure_rhs = ti.ndarray(float, shape=(self.num_pressure_dof[None]))
 
@@ -97,11 +95,25 @@ class ImcompressibleFlowSimulation:
                 A[self.vy_id[I], self.vy_id[I]] += 1 + self.nu * self.dt / (self.dx ** 2)
 
     @ti.kernel
-    def fill_pressure_matrix(self):
+    def fill_pressure_matrix(self, A: ti.types.sparse_matrix_builder()):
         for I in ti.grouped(self.pressure):
-            if I[0] == 0:
-                # only consider right edge
-            
+            if I[0] == 0 and I[1] == 0:
+                continue
+            if I[0] > 0: # left edge
+                if self.pressure_id[I[0]-1, I[1]] != -1:
+                    A[self.pressure_id[I], self.pressure_id[I]] += self.dt / (self.dx ** 2) / self.rho
+                    A[self.pressure_id[I], self.pressure_id[I[0]-1, I[1]]] -= self.dt / (self.dx ** 2) / self.rho
+            if I[0] < self.nx-1: # right edge
+                A[self.pressure_id[I], self.pressure_id[I]] += self.dt / (self.dx ** 2) / self.rho
+                A[self.pressure_id[I], self.pressure_id[I[0]+1, I[1]]] -= self.dt / (self.dx ** 2) / self.rho
+            if I[1] > 0: # bottom edge
+                if self.pressure_id[I[0], I[1]-1] != -1:
+                    A[self.pressure_id[I], self.pressure_id[I]] += self.dt / (self.dy ** 2) / self.rho
+                    A[self.pressure_id[I], self.pressure_id[I[0], I[1]-1]] -= self.dt / (self.dy ** 2) / self.rho
+            if I[1] < self.ny-1: # top edge
+                A[self.pressure_id[I], self.pressure_id[I]] += self.dt / (self.dy ** 2) / self.rho
+                A[self.pressure_id[I], self.pressure_id[I[0], I[1]+1]] -= self.dt / (self.dy ** 2) / self.rho
+                
                 
 
 
