@@ -3,7 +3,7 @@ import numpy as np
 
 @ti.data_oriented
 class ImcompressibleFlowSimulation:
-    def __init__(self, Lx, Ly, nx, ny):
+    def __init__(self, Lx, Ly, nx, ny, rho, nu):
         self.vx = ti.field(dtype=float, shape=(nx+1, ny))
         self.vy = ti.field(dtype=float, shape=(nx, ny+1))
         self.pressure = ti.field(dtype=float, shape=(nx, ny))
@@ -14,7 +14,7 @@ class ImcompressibleFlowSimulation:
         self.ny = ny
         self.dx = Lx / nx
         self.dy = Ly / ny
-        self.dt = 0.01
+        self.dt = 0.001
         self.gradp_x = ti.field(dtype=float, shape=(nx+1, ny))
         self.gradp_y = ti.field(dtype=float, shape=(nx, ny+1))
         self.div_v = ti.field(dtype=float, shape=(nx, ny))
@@ -28,6 +28,82 @@ class ImcompressibleFlowSimulation:
         self.vR = ti.Vector.field(2, float, shape=())
         self.vT = ti.Vector.field(2, float, shape=())
         self.vB = ti.Vector.field(2, float, shape=())
+        self.rho = ti.cast(rho, float)
+        self.nu = ti.cast(nu, float)
+        self.pressure_id = ti.field(dtype=int, shape=(nx, ny))
+        self.vx_id = ti.field(dtype=int, shape=(nx+1, ny))
+        self.vy_id = ti.field(dtype=int, shape=(nx, ny+1))
+        self.num_vel_dof = ti.field(dtype=int, shape=())
+        self.num_pressure_dof = ti.field(dtype=int, shape=())
+
+        self.label_dof()
+        L_builder = ti.linalg.SparseMatrixBuilder(self.num_vel_dof[None], self.num_vel_dof[None], self.num_vel_dof[None] * 6)
+        DG_builder = ti.linalg.SparseMatrixBuilder(self.num_pressure_dof[None], self.num_pressure_dof[None], self.nx * self.ny * 20)
+        self.fill_laplacian_matrix(L_builder)
+        self.L = L_builder.build()
+        self.fill_pressure_matrix(DG_builder)
+        self.DG = DG_builder.build()
+        self.DG.mmwrite("test.mtx")
+        import pdb; pdb.set_trace()
+        self.advection_rhs = ti.ndarray(float, shape=(self.num_vel_dof[None]))
+        self.pressure_rhs = ti.ndarray(float, shape=(self.num_pressure_dof[None]))
+
+    @ti.kernel
+    def fill_laplacian_matrix(self, A: ti.types.sparse_matrix_builder()):
+        for I in ti.grouped(self.laplacian_vx):
+            if I[0] == 0 or I[0] == self.nx:
+                continue
+            A[self.vx_id[I], self.vx_id[I]] += 1 + self.nu * self.dt / (self.dx ** 2)
+            if I[0] == 1:
+                A[self.vx_id[I], self.vx_id[I[0]+1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
+            elif I[0] == self.nx-1:
+                A[self.vx_id[I], self.vx_id[I[0]-1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
+            else:
+                A[self.vx_id[I], self.vx_id[I[0]-1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
+                A[self.vx_id[I], self.vx_id[I[0]+1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
+            
+            if I[1] == 0:
+                A[self.vx_id[I], self.vx_id[I[0], I[1]+1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
+                A[self.vx_id[I], self.vx_id[I]] += 1 + 1.5 * self.nu * self.dt / (self.dy ** 2)
+            elif I[1] == self.ny-1:
+                A[self.vx_id[I], self.vx_id[I[0], I[1]-1]]  += -0.5 * self.nu * self.dt / (self.dy ** 2)
+                A[self.vx_id[I], self.vx_id[I]] += 1 + 1.5 * self.nu * self.dt / (self.dy ** 2)
+            else:
+                A[self.vx_id[I], self.vx_id[I[0], I[1]-1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
+                A[self.vx_id[I], self.vx_id[I[0], I[1]+1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
+                A[self.vx_id[I], self.vx_id[I]] += 1 + self.nu * self.dt / (self.dy ** 2)
+        
+        for I in ti.grouped(self.laplacian_vy):
+            if I[1] == 0 or I[1] == self.ny:
+                continue
+            A[self.vy_id[I], self.vy_id[I]] += 1 + self.nu * self.dt / (self.dy ** 2)
+            if I[1] == 1:
+                A[self.vy_id[I], self.vy_id[I[0], I[1]+1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
+            elif I[1] == self.ny-1:
+                A[self.vy_id[I], self.vy_id[I[0], I[1]-1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
+            else:
+                A[self.vy_id[I], self.vy_id[I[0], I[1]-1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
+                A[self.vy_id[I], self.vy_id[I[0], I[1]+1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
+            
+            if I[0] == 0:
+                A[self.vy_id[I], self.vy_id[I[0]+1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
+                A[self.vy_id[I], self.vy_id[I]] += 1 + 1.5 * self.nu * self.dt / (self.dx ** 2)
+            elif I[0] == self.nx-1:
+                A[self.vy_id[I], self.vy_id[I[0]-1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
+                A[self.vy_id[I], self.vy_id[I]] += 1 + 1.5 * self.nu * self.dt / (self.dx ** 2)
+            else:
+                A[self.vy_id[I], self.vy_id[I[0]-1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
+                A[self.vy_id[I], self.vy_id[I[0]+1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
+                A[self.vy_id[I], self.vy_id[I]] += 1 + self.nu * self.dt / (self.dx ** 2)
+
+    @ti.kernel
+    def fill_pressure_matrix(self):
+        for I in ti.grouped(self.pressure):
+            if I[0] == 0:
+                # only consider right edge
+            
+                
+
 
     def reset(self):
         self.vx.fill(0)
@@ -38,6 +114,29 @@ class ImcompressibleFlowSimulation:
         self.vB.fill(0)
         self.vT.fill(0)
         self.vB.fill(0)
+
+    @ti.kernel
+    def label_dof(self):
+        self.num_pressure_dof[None] = 0
+        self.num_vel_dof[None] = 0
+        for I in ti.grouped(self.pressure):
+            if I[0] == 0 and I[1] == 0:
+                self.pressure_id[I] = -1
+            else:
+                idx = ti.atomic_add(self.num_pressure_dof[None], 1)
+                self.pressure_id[I] = idx
+        for I in ti.grouped(self.vx):
+            if I[0] == 0 or I[0] == self.nx:
+                self.vx_id[I] = -1
+            else:
+                idx = ti.atomic_add(self.num_vel_dof[None], 1)
+                self.vx_id[I] = idx
+        for I in ti.grouped(self.vy):
+            if  I[1] == 0 or I[1] == self.ny:
+                self.vy_id[I] = -1
+            else:
+                idx = ti.atomic_add(self.num_vel_dof[None], 1)
+                self.vy_id[I] = idx
 
     @ti.kernel
     def set_wall_vel(self, vL:ti.types.ndarray(), vR:ti.types.ndarray(), vB:ti.types.ndarray(), vT:ti.types.ndarray()):
@@ -162,6 +261,11 @@ class ImcompressibleFlowSimulation:
     @ti.kernel
     def compute_advection(self):
         for I in ti.grouped(self.advect_vx):
+            self.advect_vx_prev[I] = self.advect_vx[I]
+        for I in ti.grouped(self.advect_vy):
+            self.advect_vy_prev[I] = self.advect_vy[I]
+
+        for I in ti.grouped(self.advect_vx):
             if I[0] == 0 or I[0] == self.nx:
                 self.advect_vx[I] = 0
                 continue
@@ -219,50 +323,16 @@ class ImcompressibleFlowSimulation:
                 vxr = 0.5 * (self.vx[I[0]+1, I[1]] + self.vx[I[0]+1, I[1]-1])
             
             self.advect_vy[I] = (vyr * vxr - vyl * vxl) / self.dx + (vyt ** 2 - vyb ** 2) / self.dy
+    
+    def substep(self):
+        self.compute_advection()
+
 
 
 if __name__ == '__main__':
-    ti.init(default_fp=ti.f64)
-    simulator = ImcompressibleFlowSimulation(1, 1, 64, 64)
-    simulator.test_sample()
-
-    import matplotlib.pyplot as plt
-    # add four subplots
-
-    plt.figure(figsize=(12, 12))
-    plt.subplot(221)
-    u_img = np.zeros([simulator.nx, simulator.ny])
-    simulator.visualize_u(u_img)
-    plt.imshow(u_img)
-    plt.colorbar()
-    plt.gca().invert_yaxis()
-    plt.title('vx')
-
-    plt.subplot(222)
-    v_img = np.zeros([simulator.nx, simulator.ny])
-    simulator.visualize_v(v_img)
-    plt.imshow(v_img)
-    plt.colorbar()
-    plt.gca().invert_yaxis()
-    plt.title('vy')
-
-    plt.subplot(223)
-    p_img = np.zeros([simulator.nx, simulator.ny])
-    simulator.visualize_p(p_img)
-    plt.imshow(p_img)
-    plt.colorbar()
-    plt.gca().invert_yaxis()
-    plt.title('pressure')
-
-    plt.subplot(224)
-    vorticity_img = np.zeros([simulator.nx, simulator.ny])
-    simulator.visualize_vorticity(vorticity_img)
-    plt.imshow(vorticity_img)
-    plt.colorbar()
-    plt.gca().invert_yaxis()
-    plt.title('vorticity')
-
-    plt.show()
+    ti.init(default_fp=ti.f32)
+    simulator = ImcompressibleFlowSimulation(1, 1, 64, 64, 1000, 1)
+    simulator.substep()
     
 
     

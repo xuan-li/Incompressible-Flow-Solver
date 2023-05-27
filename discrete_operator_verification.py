@@ -149,7 +149,7 @@ class DiscreteOperatorTester():
 
 
 if __name__ == '__main__':
-    ti.init(default_fp=ti.f64, arch=ti.cuda)
+    ti.init(default_fp=ti.32, arch=ti.cuda, device_memory_fraction=0.7)
     import sys
     N = int(sys.argv[1])
     tester = DiscreteOperatorTester(1.0, 1.0, N, N)
