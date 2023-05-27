@@ -1,5 +1,6 @@
 import taichi as ti
 import numpy as np
+from conjugate_gradient import conjugate_gradient
 
 @ti.data_oriented
 class ImcompressibleFlowSimulation:
@@ -113,9 +114,32 @@ class ImcompressibleFlowSimulation:
             if I[1] < self.ny-1: # top edge
                 A[self.pressure_id[I], self.pressure_id[I]] += self.dt / (self.dy ** 2) / self.rho
                 A[self.pressure_id[I], self.pressure_id[I[0], I[1]+1]] -= self.dt / (self.dy ** 2) / self.rho
-                
-                
+    
+    @ti.kernel
+    def fill_pressure_rhs(self):
+        pass
 
+    @ti.kernel
+    def fill_advection_rhs(self):
+        for I in ti.grouped(self.vx):
+            if I[0] == 0 or I[0] == self.nx:
+                continue
+            self.advection_rhs[self.vx_id[I]] += self.vx[I] + 0.5 * self.dt * self.nu * self.laplacian_vx[I] \
+                                                - 0.5 * self.dt * (3 * self.advect_vx[I] - self.advect_vx_prev[I])
+            if I[0] == 1:
+                self.advection_rhs[self.vx_id[I]] += 0.5 * self.nu * self.dt / (self.dx ** 2) * self.vx[I-1, I[1]]
+            elif I[0] == self.nx-1:
+                self.advection_rhs[self.vx_id[I]] += 0.5 * self.nu * self.dt / (self.dx ** 2) * self.vx[I+1, I[1]]
+        
+        for I in ti.grouped(self.vy):
+            if I[1] == 0 or I[1] == self.ny:
+                continue
+            self.advection_rhs[self.vy_id[I]] += self.vy[I] + 0.5 * self.dt * self.nu * self.laplacian_vy[I] \
+                                                - 0.5 * self.dt * (3 * self.advect_vy[I] - self.advect_vy_prev[I])
+            if I[1] == 1:
+                self.advection_rhs[self.vy_id[I]] += 0.5 * self.nu * self.dt / (self.dy ** 2) * self.vy[I[0], I-1]
+            elif I[1] == self.ny-1:
+                self.advection_rhs[self.vy_id[I]] += 0.5 * self.nu * self.dt / (self.dy ** 2) * self.vy[I[0], I+1]
 
     def reset(self):
         self.vx.fill(0)
@@ -336,8 +360,45 @@ class ImcompressibleFlowSimulation:
             
             self.advect_vy[I] = (vyr * vxr - vyl * vxl) / self.dx + (vyt ** 2 - vyb ** 2) / self.dy
     
+    @ti.kernel
+    def assign_velocity(self, v:ti.types.ndarray()):
+        for I in ti.grouped(self.vx):
+            if self.vx_id[I] != -1:
+                self.vx[I] = v[self.vx_id[I]]
+        for I in ti.grouped(self.vy):
+            if self.vy_id[I] != -1:
+                self.vy[I] = v[self.vy_id[I]]
+    
+    @ti.kernel
+    def assign_pressure(self, p:ti.types.ndarray()):
+        for I in ti.grouped(self.pressure):
+            if self.pressure_id[I] != -1:
+                self.pressure[I] = p[self.pressure_id[I]]
+    
+    @ti.kernel
+    def update_velocity(self):
+        pass
+
     def substep(self):
         self.compute_advection()
+        self.compute_laplacian_v()
+        self.pressure_rhs.fill(0)
+        self.advection_rhs.fill(0)
+        self.pressure.fill(0)
+        self.fill_advection_rhs()
+        v = ti.ndarray(float, self.num_vel_dof[None])
+        conjugate_gradient(self.Lv, self.advection_rhs, v, 1e-5, self.num_vel_dof[None])
+        self.assign_velocity(v)
+        self.compute_div_v()
+        self.fill_pressure_rhs()
+        p = ti.ndarray(float, self.num_pressure_dof[None])
+        conjugate_gradient(self.Lp, self.pressure_rhs, p, 1e-5, self.num_pressure_dof[None])
+        self.assign_pressure(p)
+        self.compute_gradp()
+        self.update_velocity()
+
+        
+
 
 
 
