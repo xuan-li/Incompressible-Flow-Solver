@@ -44,13 +44,16 @@ def step_forward(a: ti.types.ndarray(), b: ti.types.ndarray(), dt: float, res: t
     for i in range(a.shape[0]):
         res[i] = a[i] + b[i] * dt
 
-def conjugate_gradient(A, b, tol, max_iter):
+def conjugate_gradient(A, b, tol, max_iter, translation_invariant = False):
     # diagonal preconditioned
+    if translation_invariant:
+        b[0] = 0
     x = ti.ndarray(float, shape=A.shape[0])
     diag = ti.ndarray(float, shape=A.shape[0])
     for i in range(A.shape[0]):
         diag[i] = A[i, i]
     Ax = A @ x
+    Ax[0] = 0
     r = ti.ndarray(float, shape=A.shape[0])
     q = ti.ndarray(float, shape=A.shape[0])
     subtract(b, Ax, r)
@@ -59,12 +62,17 @@ def conjugate_gradient(A, b, tol, max_iter):
     r_norm = norm(r)
     tol = tol * r_norm
     rq = dot(r, q)
+    if r_norm < 1e-10:
+        print(f'CG converged in 0 iterations.')
+        return x
     for i in range(max_iter):
         r_norm = norm(r)
         if i % 10 == 0 and r_norm < tol:
             print(f'CG converged in {i} iterations.')
-            return
+            break
         Ap = A @ p
+        if translation_invariant:
+            Ap[0] = 0
         alpha = rq / dot(p, Ap)
         step_forward(x, p, alpha, x)
         step_forward(r, Ap, -alpha, r)
@@ -73,6 +81,8 @@ def conjugate_gradient(A, b, tol, max_iter):
         rq = dot(r,q)
         beta = rq / rq_prev
         step_forward(q, p, beta, p)
+    
+    return x
 
 if __name__ == "__main__":
     ti.init(arch=ti.cuda, default_fp=ti.f32)
