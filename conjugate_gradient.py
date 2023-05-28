@@ -63,7 +63,7 @@ def conjugate_gradient(A, b, tol, max_iter, translation_invariant = False):
     tol = tol * r_norm
     rq = dot(r, q)
     if r_norm < 1e-10:
-        print(f'CG converged in 0 iterations.')
+        # print(f'CG converged in 0 iterations.')
         return x
     for i in range(max_iter):
         r_norm = norm(r)
