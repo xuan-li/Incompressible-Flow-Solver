@@ -423,18 +423,6 @@ class ImcompressibleFlowSimulation:
             self.vy[I] -= self.dt * self.gradp_y[I]
     
     @ti.kernel
-    def advect_explicit(self):
-        for I in ti.grouped(self.vx):
-            if I[0] == 0 or I[0] == self.nx:
-                continue
-            self.vx[I] += self.dt * (self.nu * self.laplacian_vx[I] - self.advect_vx[I])
-        
-        for I in ti.grouped(self.vy):
-            if I[1] == 0 or I[1] == self.ny:
-                continue
-            self.vy[I] += self.dt * (self.nu * self.laplacian_vy[I] - self.advect_vy[I])
-    
-    @ti.kernel
     def divergence_error(self) -> float:
         res = ti.cast(0.0, float)
         for I in ti.grouped(self.div_v):
@@ -465,19 +453,6 @@ class ImcompressibleFlowSimulation:
         pressure_rhs.fill(0.0)
         self.fill_pressure_rhs(pressure_rhs)
         p = conjugate_gradient(self.Lp, pressure_rhs, 1e-5, self.num_pressure_dof[None], True)
-        self.assign_pressure(p)
-        self.compute_gradp()
-        self.update_velocity()
-
-    def substep_explicit(self):
-        self.compute_advection()
-        self.compute_laplacian_v()
-        self.advect_explicit()
-        self.compute_div_v()
-        pressure_rhs = ti.ndarray(float, shape=(self.num_pressure_dof[None]))
-        pressure_rhs.fill(0.0)
-        self.fill_pressure_rhs(pressure_rhs)
-        p = conjugate_gradient(self.Lp, pressure_rhs, 1e-7, self.num_pressure_dof[None], True)
         self.assign_pressure(p)
         self.compute_gradp()
         self.update_velocity()
