@@ -2,6 +2,26 @@ import taichi as ti
 import numpy as np
 from conjugate_gradient import conjugate_gradient
 
+
+@ti.func
+def bilerp(x, f00, f10, f01, f11):
+    return (1 - x[0]) * (1 - x[1]) * f00 + x[0] * (1 - x[1]) * f10 + (1 - x[0]) * x[1] * f01 + x[0] * x[1] * f11
+
+def write_ply(fn, pos):
+    num_particles = len(pos)
+    with open(fn, 'wb') as f:
+        header = f"""ply
+format binary_little_endian 1.0
+comment Created by taichi
+element vertex {num_particles}
+property float x
+property float y
+property float z
+end_header
+"""
+        f.write(str.encode(header))
+        f.write(pos.tobytes())
+
 @ti.data_oriented
 class ImcompressibleFlowSimulation:
     def __init__(self, Lx, Ly, nx, ny, rho, nu, dtype=ti.f32):
@@ -416,32 +436,77 @@ class ImcompressibleFlowSimulation:
         for I in ti.grouped(self.laplacian_vy):
             self.laplacian_vy[I]
             
-
     def substep(self):
         self.compute_advection()
         self.compute_laplacian_v()
         self.pressure.fill(0)
         advection_rhs = ti.ndarray(float, shape=(self.num_vel_dof[None]))
         self.fill_advection_rhs(advection_rhs)
-        v = conjugate_gradient(self.Lv, advection_rhs, 1e-7, self.num_vel_dof[None])
+        v = conjugate_gradient(self.Lv, advection_rhs, 1e-3, self.num_vel_dof[None])
         self.assign_velocity(v)
         self.compute_div_v()
         pressure_rhs = ti.ndarray(float, shape=(self.num_pressure_dof[None]))
         self.fill_pressure_rhs(pressure_rhs)
-        p = conjugate_gradient(self.Lp, pressure_rhs, 1e-7, self.num_pressure_dof[None], True)
+        p = conjugate_gradient(self.Lp, pressure_rhs, 1e-3, self.num_pressure_dof[None], True)
         self.assign_pressure(p)
         self.compute_gradp()
         self.update_velocity()
         self.compute_div_v()
-        print(self.divergence_error())
 
+    @ti.kernel
+    def advect_particles(self, pos: ti.types.ndarray()):
+        for p in range(pos.shape[0]):
+            x = ti.Vector([pos[p, 0]/ self.dx, pos[p, 1]/ self.dy])
+            I00 = ti.floor(ti.Vector([x[0], x[1] - 0.5])).cast(int)
+            I01 = I00 + ti.Vector([0, 1])
+            I10 = I00 + ti.Vector([1, 0])
+            I11 = I00 + ti.Vector([1, 1])
+            base = ti.Vector([I00[0], I00[1]+0.5])
+            v00 = 2 * self.vB[None][0] - self.vx[I00[0], 0]
+            v10 = 2 * self.vB[None][0] - self.vx[I10[0], 0]
+            if I00[1] != -1:
+                v00 = self.vx[I00]
+                v10 = self.vx[I10]
+            v01 = 2 * self.vT[None][0] - self.vx[I01[0], self.ny - 1]
+            v11 = 2 * self.vT[None][0] - self.vx[I11[0], self.ny - 1]
+            if I01[1] != self.ny:
+                v01 = self.vx[I01]
+                v11 = self.vx[I11]
+            vx = bilerp(x - base, v00, v10, v01, v11)
+
+            I00 = ti.floor(ti.Vector([x[0] - 0.5, x[1]])).cast(int)
+            I01 = I00 + ti.Vector([0, 1])
+            I10 = I00 + ti.Vector([1, 0])
+            I11 = I00 + ti.Vector([1, 1])
+            base = ti.Vector([I00[0] + 0.5, I00[1]])
+            v00 = 2 * self.vL[None][0] - self.vy[0, I00[1]]
+            v10 = 2 * self.vL[None][0] - self.vy[0, I10[1]]
+            if I00[0] != -1:
+                v00 = self.vy[I00]
+                v10 = self.vy[I10]
+            v01 = 2 * self.vR[None][0] - self.vy[self.nx - 1, I01[1]]
+            v11 = 2 * self.vR[None][0] - self.vy[self.nx - 1, I11[1]]
+            if I01[0] != self.nx:
+                v01 = self.vy[I01]
+                v11 = self.vy[I11]
+            vy = bilerp(x - base, v00, v10, v01, v11)
+
+            pos[p, 0] += self.dt * vx
+            pos[p, 1] += self.dt * vy
+            
 
 if __name__ == '__main__':
     default_fp = ti.f64
     ti.init(default_fp=default_fp)
     simulator = ImcompressibleFlowSimulation(1, 1, 100, 100, 1000, 1, dtype=default_fp)
     simulator.set_wall_vel(np.array([0.,0.]), np.array([0.,0.]), np.array([0.,0.]), np.array([1.,0.]))
-    simulator.substep()
+    pos = np.random.rand(10000, 2)
+    import os
+    os.makedirs('results', exist_ok=True)
+    for i in range(100):
+        simulator.substep()
+        simulator.advect_particles(pos)
+        write_ply('results/{}.ply'.format(i), pos)
     
 
     
