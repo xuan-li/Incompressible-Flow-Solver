@@ -68,7 +68,7 @@ def conjugate_gradient(A, b, tol, max_iter, translation_invariant = False):
     for i in range(max_iter):
         r_norm = norm(r)
         if i % 10 == 0 and r_norm < tol:
-            print(f'CG converged in {i} iterations.')
+            # print(f'CG converged in {i} iterations.')
             break
         Ap = A @ p
         if translation_invariant:

@@ -1,6 +1,7 @@
 import taichi as ti
 import numpy as np
 from conjugate_gradient import conjugate_gradient
+import matplotlib.pyplot as plt
 
 
 @ti.func
@@ -86,14 +87,14 @@ class ImcompressibleFlowSimulation:
             
             if I[1] == 0:
                 A[self.vx_id[I], self.vx_id[I[0], I[1]+1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
-                A[self.vx_id[I], self.vx_id[I]] += 1 + 1.5 * self.nu * self.dt / (self.dy ** 2)
+                A[self.vx_id[I], self.vx_id[I]] += 1.5 * self.nu * self.dt / (self.dy ** 2)
             elif I[1] == self.ny-1:
                 A[self.vx_id[I], self.vx_id[I[0], I[1]-1]]  += -0.5 * self.nu * self.dt / (self.dy ** 2)
-                A[self.vx_id[I], self.vx_id[I]] += 1 + 1.5 * self.nu * self.dt / (self.dy ** 2)
+                A[self.vx_id[I], self.vx_id[I]] += 1.5 * self.nu * self.dt / (self.dy ** 2)
             else:
                 A[self.vx_id[I], self.vx_id[I[0], I[1]-1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
                 A[self.vx_id[I], self.vx_id[I[0], I[1]+1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
-                A[self.vx_id[I], self.vx_id[I]] += 1 + self.nu * self.dt / (self.dy ** 2)
+                A[self.vx_id[I], self.vx_id[I]] += self.nu * self.dt / (self.dy ** 2)
         
         for I in ti.grouped(self.laplacian_vy):
             if I[1] == 0 or I[1] == self.ny:
@@ -109,14 +110,14 @@ class ImcompressibleFlowSimulation:
             
             if I[0] == 0:
                 A[self.vy_id[I], self.vy_id[I[0]+1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
-                A[self.vy_id[I], self.vy_id[I]] += 1 + 1.5 * self.nu * self.dt / (self.dx ** 2)
+                A[self.vy_id[I], self.vy_id[I]] += 1.5 * self.nu * self.dt / (self.dx ** 2)
             elif I[0] == self.nx-1:
                 A[self.vy_id[I], self.vy_id[I[0]-1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
-                A[self.vy_id[I], self.vy_id[I]] += 1 + 1.5 * self.nu * self.dt / (self.dx ** 2)
+                A[self.vy_id[I], self.vy_id[I]] += 1.5 * self.nu * self.dt / (self.dx ** 2)
             else:
                 A[self.vy_id[I], self.vy_id[I[0]-1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
                 A[self.vy_id[I], self.vy_id[I[0]+1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
-                A[self.vy_id[I], self.vy_id[I]] += 1 + self.nu * self.dt / (self.dx ** 2)
+                A[self.vy_id[I], self.vy_id[I]] += self.nu * self.dt / (self.dx ** 2)
 
     @ti.kernel
     def fill_advection_rhs(self, advection_rhs: ti.types.ndarray()):
@@ -295,6 +296,31 @@ class ImcompressibleFlowSimulation:
             self.div_v[I] = gradx_vx + grady_vy
 
     @ti.kernel
+    def compute_vorticity(self):
+        for I in ti.grouped(self.vorticity):
+            vy_left = ti.cast(0, float)
+            if I[0] == 0:
+                vy_left = 2 * self.vL[None][1] - self.vy[I]
+            else:
+                vy_left = self.vy[I[0]-1, I[1]]
+            vy_right = ti.cast(0, float)
+            if I[0] == self.nx:
+                vy_right = 2 * self.vR[None][1] - self.vy[I]
+            else:
+                vy_right = self.vy[I[0], I[1]]
+            vx_bottom = ti.cast(0, float)
+            if I[1] == 0:
+                vx_bottom = 2 * self.vB[None][0] - self.vx[I]
+            else:
+                vx_bottom = self.vx[I[0], I[1]-1]
+            vx_top = ti.cast(0, float)
+            if I[1] == self.ny:
+                vx_top = 2 * self.vT[None][0] - self.vx[I]
+            else:
+                vx_top = self.vx[I[0], I[1]]
+            self.vorticity[I] = (vx_top - vx_bottom) / self.dy - (vy_right - vy_left) / self.dx
+
+    @ti.kernel
     def compute_laplacian_v(self):
         for I in ti.grouped(self.laplacian_vx):
             if I[0] == 0 or I[0] == self.nx:
@@ -446,13 +472,13 @@ class ImcompressibleFlowSimulation:
         advection_rhs = ti.ndarray(float, shape=(self.num_vel_dof[None]))
         advection_rhs.fill(0.0)
         self.fill_advection_rhs(advection_rhs)
-        v = conjugate_gradient(self.Lv, advection_rhs, 1e-5, self.num_vel_dof[None])
+        v = conjugate_gradient(self.Lv, advection_rhs, 1e-3, self.num_vel_dof[None])
         self.assign_velocity(v)
         self.compute_div_v()
         pressure_rhs = ti.ndarray(float, shape=(self.num_pressure_dof[None]))
         pressure_rhs.fill(0.0)
         self.fill_pressure_rhs(pressure_rhs)
-        p = conjugate_gradient(self.Lp, pressure_rhs, 1e-5, self.num_pressure_dof[None], True)
+        p = conjugate_gradient(self.Lp, pressure_rhs, 1e-3, self.num_pressure_dof[None], True)
         self.assign_pressure(p)
         self.compute_gradp()
         self.update_velocity()
@@ -498,32 +524,47 @@ class ImcompressibleFlowSimulation:
 
             pos[p][0] += self.dt * vx
             pos[p][1] += self.dt * vy
-            pos[p][0] %= self.Lx
-            pos[p][1] %= self.Ly
+            if pos[p][0] < 0:
+                pos[p][0] += self.Lx
+            elif pos[p][0] >= self.Lx:
+                pos[p][0] -= self.Lx
+            if pos[p][1] < 0:
+                pos[p][1] += self.Ly
+            elif pos[p][1] >= self.Ly:
+                pos[p][1] -= self.Ly
             
 
 if __name__ == '__main__':
     default_fp = ti.f64
     ti.init(default_fp=default_fp, arch=ti.cpu)
-    dt = 0.1
-    frame_dt = 1.0
-    simulator = ImcompressibleFlowSimulation(1, 1, 100, 100, 1./1000, dt = dt, dtype=default_fp)
+    dt = 0.02
+    frame_dt = 0.1
+    Re = 400
+    simulator = ImcompressibleFlowSimulation(1, 1, 100, 100, 1/Re, dt = dt, dtype=default_fp)
     simulator.set_wall_vel(np.array([0.,0.]), np.array([0.,0.]), np.array([0.,0.]), np.array([1.,0.]))
     pos = ti.Vector.ndarray(3, float, 10000)
     pos_data = np.random.rand(10000, 3)
     pos_data[:, 2] = 0
     pos.from_numpy(pos_data)
     import os
-    os.makedirs('results_400', exist_ok=True)
-    write_ply('results/{}.ply'.format(0), pos)
-    for f in range(100):
+    os.makedirs(f'results_{Re}', exist_ok=True)
+    for f in range(500):
         for i in range(int(frame_dt/ simulator.dt)):
             simulator.substep()
-            #simulator.substep_explicit()
             simulator.advect_particles(pos)
-        print(simulator.vx[1, 1], simulator.vy[1, 1])
-        write_ply('results/{}.ply'.format(f+1), pos)
         print("frame {} done".format(f+1))
+        write_ply(f'results_{Re}/{f+1}.ply', pos)
+        simulator.compute_vorticity()
+        image = np.zeros((simulator.nx, simulator.ny))
+        simulator.visualize_vorticity(image)
+        image = image.transpose(1, 0)
+        plt.clf()
+        plt.imshow(image, cmap='jet', vmin=-3., vmax=5.)
+        # set color from blue to red
+
+        plt.gca().invert_yaxis()
+        plt.colorbar()
+        plt.savefig(f'results_{Re}/{f+1}.png', bbox_inches='tight')
     
 
     
