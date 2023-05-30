@@ -3,12 +3,15 @@ import numpy as np
 import scipy as sp
 from scipy.io import mmread
 import copy
+from timer import Timer
 
 @ti.kernel
-def fill(A: ti.types.sparse_matrix_builder(), n: int, row: ti.types.ndarray(), col: ti.types.ndarray(), val: ti.types.ndarray()):
+def fill(A: ti.types.sparse_matrix_builder(), n: int, row: ti.types.ndarray(), col: ti.types.ndarray(), val: ti.types.ndarray(), diag: ti.types.ndarray()):
     for i in range(n):
         for j in range(row[i], row[i + 1]):
             A[i, col[j]] += val[j]
+            if col[j] == i:
+                diag[i] += val[j]
 
 @ti.kernel
 def add(a:ti.types.ndarray(), b:ti.types.ndarray(), apb:ti.types.ndarray()):
@@ -44,14 +47,11 @@ def step_forward(a: ti.types.ndarray(), b: ti.types.ndarray(), dt: float, res: t
     for i in range(a.shape[0]):
         res[i] = a[i] + b[i] * dt
 
-def conjugate_gradient(A, b, tol, max_iter, translation_invariant = False):
+def conjugate_gradient(A, b, diag, tol, max_iter, translation_invariant = False):
     # diagonal preconditioned
     if translation_invariant:
         b[0] = 0
     x = ti.ndarray(float, shape=A.shape[0])
-    diag = ti.ndarray(float, shape=A.shape[0])
-    for i in range(A.shape[0]):
-        diag[i] = A[i, i]
     Ax = A @ x
     Ax[0] = 0
     r = ti.ndarray(float, shape=A.shape[0])
@@ -86,12 +86,16 @@ def conjugate_gradient(A, b, tol, max_iter, translation_invariant = False):
 
 if __name__ == "__main__":
     ti.init(arch=ti.cuda, default_fp=ti.f32)
-    A_sci = mmread('test_matrix.mtx')
+    A_sci = mmread('Lv.mtx')
     A_sci = A_sci.tocsr()
     A_builder = ti.linalg.SparseMatrixBuilder(A_sci.shape[0], A_sci.shape[1], A_sci.nnz)
-    fill(A_builder, A_sci.shape[0], A_sci.indptr, A_sci.indices, A_sci.data)
+    diag = ti.ndarray(float, shape=A_sci.shape[0])
+    fill(A_builder, A_sci.shape[0], A_sci.indptr, A_sci.indices, A_sci.data, diag)
     A = A_builder.build()
     b = ti.ndarray(float, shape=A.shape[0])
     b.fill(1)
     print(f"A shape: {A.shape}")
-    conjugate_gradient(A, b, tol=1e-7, max_iter=10000)
+    import time
+    t = time.time()
+    conjugate_gradient(A, b, tol=1e-7, max_iter=10000, diag=diag)
+    print(f"Time: {time.time() - t}")

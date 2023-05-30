@@ -62,21 +62,24 @@ class ImcompressibleFlowSimulation:
 
         self.label_dof()
         Lv_builder = ti.linalg.SparseMatrixBuilder(self.num_vel_dof[None], self.num_vel_dof[None], self.num_vel_dof[None] * 6, dtype=self.dtype)
-        self.fill_laplacian_matrix(Lv_builder)
+        self.Lv_diag = ti.ndarray(float, shape=self.num_vel_dof[None])
+        self.fill_laplacian_matrix(Lv_builder, self.Lv_diag)
         self.Lv = Lv_builder.build()
 
         Lp_builder = ti.linalg.SparseMatrixBuilder(self.num_pressure_dof[None], self.num_pressure_dof[None], self.num_pressure_dof[None] * 8, dtype=self.dtype)
-        self.fill_pressure_matrix(Lp_builder)
+        self.Lp_diag = ti.ndarray(float, shape=self.num_pressure_dof[None])
+        self.fill_pressure_matrix(Lp_builder, self.Lp_diag)
         self.Lp = Lp_builder.build()
 
         print("Reinald number: ", 1. / self.nu)
 
     @ti.kernel
-    def fill_laplacian_matrix(self, A: ti.types.sparse_matrix_builder()):
+    def fill_laplacian_matrix(self, A: ti.types.sparse_matrix_builder(), diag: ti.types.ndarray()):
         for I in ti.grouped(self.laplacian_vx):
             if I[0] == 0 or I[0] == self.nx:
                 continue
             A[self.vx_id[I], self.vx_id[I]] += 1 + self.nu * self.dt / (self.dx ** 2)
+            diag[self.vx_id[I]] += 1 + self.nu * self.dt / (self.dx ** 2)
             if I[0] == 1:
                 A[self.vx_id[I], self.vx_id[I[0]+1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
             elif I[0] == self.nx-1:
@@ -88,18 +91,22 @@ class ImcompressibleFlowSimulation:
             if I[1] == 0:
                 A[self.vx_id[I], self.vx_id[I[0], I[1]+1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
                 A[self.vx_id[I], self.vx_id[I]] += 1.5 * self.nu * self.dt / (self.dy ** 2)
+                diag[self.vx_id[I]] += 1.5 * self.nu * self.dt / (self.dy ** 2)
             elif I[1] == self.ny-1:
                 A[self.vx_id[I], self.vx_id[I[0], I[1]-1]]  += -0.5 * self.nu * self.dt / (self.dy ** 2)
                 A[self.vx_id[I], self.vx_id[I]] += 1.5 * self.nu * self.dt / (self.dy ** 2)
+                diag[self.vx_id[I]] += 1.5 * self.nu * self.dt / (self.dy ** 2)
             else:
                 A[self.vx_id[I], self.vx_id[I[0], I[1]-1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
                 A[self.vx_id[I], self.vx_id[I[0], I[1]+1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
                 A[self.vx_id[I], self.vx_id[I]] += self.nu * self.dt / (self.dy ** 2)
+                diag[self.vx_id[I]] += self.nu * self.dt / (self.dy ** 2)
         
         for I in ti.grouped(self.laplacian_vy):
             if I[1] == 0 or I[1] == self.ny:
                 continue
             A[self.vy_id[I], self.vy_id[I]] += 1 + self.nu * self.dt / (self.dy ** 2)
+            diag[self.vy_id[I]] += 1 + self.nu * self.dt / (self.dy ** 2)
             if I[1] == 1:
                 A[self.vy_id[I], self.vy_id[I[0], I[1]+1]] += -0.5 * self.nu * self.dt / (self.dy ** 2)
             elif I[1] == self.ny-1:
@@ -111,13 +118,16 @@ class ImcompressibleFlowSimulation:
             if I[0] == 0:
                 A[self.vy_id[I], self.vy_id[I[0]+1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
                 A[self.vy_id[I], self.vy_id[I]] += 1.5 * self.nu * self.dt / (self.dx ** 2)
+                diag[self.vy_id[I]] += 1.5 * self.nu * self.dt / (self.dx ** 2)
             elif I[0] == self.nx-1:
                 A[self.vy_id[I], self.vy_id[I[0]-1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
                 A[self.vy_id[I], self.vy_id[I]] += 1.5 * self.nu * self.dt / (self.dx ** 2)
+                diag[self.vy_id[I]] += 1.5 * self.nu * self.dt / (self.dx ** 2)
             else:
                 A[self.vy_id[I], self.vy_id[I[0]-1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
                 A[self.vy_id[I], self.vy_id[I[0]+1, I[1]]] += -0.5 * self.nu * self.dt / (self.dx ** 2)
                 A[self.vy_id[I], self.vy_id[I]] += self.nu * self.dt / (self.dx ** 2)
+                diag[self.vy_id[I]] += self.nu * self.dt / (self.dx ** 2)
 
     @ti.kernel
     def fill_advection_rhs(self, advection_rhs: ti.types.ndarray()):
@@ -151,20 +161,24 @@ class ImcompressibleFlowSimulation:
                 advection_rhs[self.vy_id[I]] += self.nu * self.dt / (self.dx ** 2) * self.vR[None][0]
 
     @ti.kernel
-    def fill_pressure_matrix(self, A: ti.types.sparse_matrix_builder()):
+    def fill_pressure_matrix(self, A: ti.types.sparse_matrix_builder(), diag: ti.types.ndarray()):
         for I in ti.grouped(self.pressure):
             if I[0] > 0: # left edge
                 A[self.pressure_id[I], self.pressure_id[I]] += self.dt / (self.dx ** 2)
                 A[self.pressure_id[I], self.pressure_id[I[0]-1, I[1]]] -= self.dt / (self.dx ** 2)
+                diag[self.pressure_id[I]] += self.dt / (self.dx ** 2)
             if I[0] < self.nx-1: # right edge
                 A[self.pressure_id[I], self.pressure_id[I]] += self.dt / (self.dx ** 2)
                 A[self.pressure_id[I], self.pressure_id[I[0]+1, I[1]]] -= self.dt / (self.dx ** 2)
+                diag[self.pressure_id[I]] += self.dt / (self.dx ** 2)
             if I[1] > 0: # bottom edge
                 A[self.pressure_id[I], self.pressure_id[I]] += self.dt / (self.dy ** 2)
                 A[self.pressure_id[I], self.pressure_id[I[0], I[1]-1]] -= self.dt / (self.dy ** 2)
+                diag[self.pressure_id[I]] += self.dt / (self.dy ** 2)
             if I[1] < self.ny-1: # top edge
                 A[self.pressure_id[I], self.pressure_id[I]] += self.dt / (self.dy ** 2)
                 A[self.pressure_id[I], self.pressure_id[I[0], I[1]+1]] -= self.dt / (self.dy ** 2)
+                diag[self.pressure_id[I]] += self.dt / (self.dy ** 2)
     
     @ti.kernel
     def fill_pressure_rhs(self, pressure_rhs:ti.types.ndarray()):
@@ -472,13 +486,13 @@ class ImcompressibleFlowSimulation:
         advection_rhs = ti.ndarray(float, shape=(self.num_vel_dof[None]))
         advection_rhs.fill(0.0)
         self.fill_advection_rhs(advection_rhs)
-        v = conjugate_gradient(self.Lv, advection_rhs, 1e-3, self.num_vel_dof[None])
+        v = conjugate_gradient(self.Lv, advection_rhs, self.Lv_diag, 1e-3, self.num_vel_dof[None])
         self.assign_velocity(v)
         self.compute_div_v()
         pressure_rhs = ti.ndarray(float, shape=(self.num_pressure_dof[None]))
         pressure_rhs.fill(0.0)
         self.fill_pressure_rhs(pressure_rhs)
-        p = conjugate_gradient(self.Lp, pressure_rhs, 1e-3, self.num_pressure_dof[None], True)
+        p = conjugate_gradient(self.Lp, pressure_rhs, self.Lp_diag, 1e-3, self.num_pressure_dof[None], True)
         self.assign_pressure(p)
         self.compute_gradp()
         self.update_velocity()
@@ -535,8 +549,8 @@ class ImcompressibleFlowSimulation:
             
 
 if __name__ == '__main__':
-    default_fp = ti.f64
-    ti.init(default_fp=default_fp, arch=ti.cpu)
+    default_fp = ti.f32
+    ti.init(default_fp=default_fp, arch=ti.cuda)
     dt = 0.02
     frame_dt = 0.1
     Re = 400
