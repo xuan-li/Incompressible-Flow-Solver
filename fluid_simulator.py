@@ -550,11 +550,11 @@ class ImcompressibleFlowSimulation:
 
 if __name__ == '__main__':
     default_fp = ti.f32
-    ti.init(default_fp=default_fp, arch=ti.cuda)
-    dt = 0.02
+    ti.init(default_fp=default_fp, arch=ti.cuda, kernel_profiler=True)
+    dt = 0.01
     frame_dt = 0.1
-    Re = 400
-    simulator = ImcompressibleFlowSimulation(1, 1, 100, 100, 1/Re, dt = dt, dtype=default_fp)
+    Re = 1000
+    simulator = ImcompressibleFlowSimulation(1, 1, 200, 200, 1/Re, dt = dt, dtype=default_fp)
     simulator.set_wall_vel(np.array([0.,0.]), np.array([0.,0.]), np.array([0.,0.]), np.array([1.,0.]))
     pos = ti.Vector.ndarray(3, float, 10000)
     pos_data = np.random.rand(10000, 3)
