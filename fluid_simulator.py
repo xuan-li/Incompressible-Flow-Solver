@@ -316,13 +316,13 @@ class ImcompressibleFlowSimulation:
     def fill_r2(self, r2: ti.types.ndarray()):
         for I in ti.grouped(self.pressure):
             if I[0] == 0:
-                r2[self.pressure_id[I]] += self.vL[None][0] / self.dx
+                r2[self.pressure_id[I]] -= self.vL[None][0] / self.dx
             if I[0] == self.nx-1:
-                r2[self.pressure_id[I]] -= self.vR[None][0] / self.dx
+                r2[self.pressure_id[I]] += self.vR[None][0] / self.dx
             if I[1] == 0:
-                r2[self.pressure_id[I]] += self.vB[None][1] / self.dy
+                r2[self.pressure_id[I]] -= self.vB[None][1] / self.dy
             if I[1] == self.ny-1:
-                r2[self.pressure_id[I]] -= self.vT[None][1] / self.dy
+                r2[self.pressure_id[I]] += self.vT[None][1] / self.dy
                 
         for i in range(self.num_surface_constraints[None]):
             r2[self.num_pressure_dof[None] + 2 * i + 0] = self.surface_vel[i][0]
