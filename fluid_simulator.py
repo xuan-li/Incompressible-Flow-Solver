@@ -1,7 +1,78 @@
 import taichi as ti
 import numpy as np
-from conjugate_gradient import conjugate_gradient
 import matplotlib.pyplot as plt
+import copy
+
+@ti.kernel
+def add(a:ti.types.ndarray(), b:ti.types.ndarray(), apb:ti.types.ndarray()):
+    for i in range(a.shape[0]):
+        apb[i] = a[i] + b[i]
+
+@ti.kernel
+def subtract(a:ti.types.ndarray(), b:ti.types.ndarray(), asubb:ti.types.ndarray()):
+    for i in range(a.shape[0]):
+        asubb[i] = a[i] - b[i]
+
+@ti.kernel
+def divide(a:ti.types.ndarray(), b:ti.types.ndarray(), adivb:ti.types.ndarray()):
+    for i in range(a.shape[0]):
+        adivb[i] = a[i] / b[i]
+
+@ti.kernel
+def norm(a:ti.types.ndarray()) -> float:
+    res = ti.cast(0.0, float)
+    for i in range(a.shape[0]):
+        ti.atomic_add(res, a[i] * a[i])
+    return ti.sqrt(res)
+
+@ti.kernel
+def dot(a:ti.types.ndarray(), b:ti.types.ndarray()) -> float:
+    res = ti.cast(0.0, float)
+    for i in range(a.shape[0]):
+        ti.atomic_add(res, a[i] * b[i])
+    return res
+
+@ti.kernel
+def step_forward(a: ti.types.ndarray(), b: ti.types.ndarray(), dt: float, res: ti.types.ndarray()):
+    for i in range(a.shape[0]):
+        res[i] = a[i] + b[i] * dt
+
+def conjugate_gradient(A, b, diag, tol, max_iter, translation_invariant = False):
+    # diagonal preconditioned
+    if translation_invariant:
+        b[0] = 0
+    x = ti.ndarray(float, shape=A.shape[0])
+    Ax = A @ x
+    Ax[0] = 0
+    r = ti.ndarray(float, shape=A.shape[0])
+    q = ti.ndarray(float, shape=A.shape[0])
+    subtract(b, Ax, r)
+    divide(r, diag, q)
+    p = copy.deepcopy(q)
+    r_norm = norm(r)
+    tol = tol * r_norm
+    rq = dot(r, q)
+    if r_norm < 1e-10:
+        # print(f'CG converged in 0 iterations.')
+        return x
+    for i in range(max_iter):
+        r_norm = norm(r)
+        if i % 10 == 0 and r_norm < tol:
+            # print(f'CG converged in {i} iterations.')
+            break
+        Ap = A @ p
+        if translation_invariant:
+            Ap[0] = 0
+        alpha = rq / dot(p, Ap)
+        step_forward(x, p, alpha, x)
+        step_forward(r, Ap, -alpha, r)
+        divide(r, diag, q)
+        rq_prev = rq
+        rq = dot(r,q)
+        beta = rq / rq_prev
+        step_forward(q, p, beta, p)
+    
+    return x
 
 
 @ti.func
@@ -38,6 +109,7 @@ class ImcompressibleFlowSimulation:
         self.ny = ny
         self.dx = Lx / nx
         self.dy = Ly / ny
+        self.ds = min([self.dx, self.dy])
         self.dt = dt
         self.gradp_x = ti.field(dtype=float, shape=(nx+1, ny))
         self.gradp_y = ti.field(dtype=float, shape=(nx, ny+1))
@@ -141,9 +213,9 @@ class ImcompressibleFlowSimulation:
                 advection_rhs[self.vx_id[I]] += 0.5 * self.nu * self.dt / (self.dx ** 2) * self.vx[I[0]+1, I[1]]
             
             if I[1] == 0:
-                advection_rhs[self.vx_id[I]] += self.nu * self.dt / (self.dy ** 2) * self.vB[None][1]
+                advection_rhs[self.vx_id[I]] += self.nu * self.dt / (self.dy ** 2) * self.vB[None][0]
             elif I[1] == self.ny-1:
-                advection_rhs[self.vx_id[I]] += self.nu * self.dt / (self.dy ** 2) * self.vT[None][1]
+                advection_rhs[self.vx_id[I]] += self.nu * self.dt / (self.dy ** 2) * self.vT[None][0]
 
         for I in ti.grouped(self.vy_id):
             if I[1] == 0 or I[1] == self.ny:
@@ -156,9 +228,9 @@ class ImcompressibleFlowSimulation:
                 advection_rhs[self.vy_id[I]] += 0.5 * self.nu * self.dt / (self.dy ** 2) * self.vy[I[0], I[1]+1]
             
             if I[0] == 0:
-                advection_rhs[self.vy_id[I]] += self.nu * self.dt / (self.dx ** 2) * self.vL[None][0]
+                advection_rhs[self.vy_id[I]] += self.nu * self.dt / (self.dx ** 2) * self.vL[None][1]
             elif I[0] == self.nx-1:
-                advection_rhs[self.vy_id[I]] += self.nu * self.dt / (self.dx ** 2) * self.vR[None][0]
+                advection_rhs[self.vy_id[I]] += self.nu * self.dt / (self.dx ** 2) * self.vR[None][1]
 
     @ti.kernel
     def fill_pressure_matrix(self, A: ti.types.sparse_matrix_builder(), diag: ti.types.ndarray()):
@@ -192,7 +264,27 @@ class ImcompressibleFlowSimulation:
                 pressure_rhs[self.pressure_id[I]] -= self.vB[None][1] / self.dy
             if I[1] < self.ny-1: # top edge
                 pressure_rhs[self.pressure_id[I]] -= self.vT[None][1] / self.dy
-
+    
+    @ti.func
+    def delta(self, x):
+        i = x / self.ds
+        weight = ti.cast(0.0, float)
+        if ti.abs(i) < 0.5:
+            weight = (1 + ti.sqrt(1 - 3 * i ** 2)) / 3
+        elif ti.abs(i) < 1.5:
+            weight =  (5 - 3*ti.abs(i) - ti.sqrt(1 - 3 * (1-ti.abs(i))**2)) / 6
+        else:
+            weight = 0
+        return weight / self.ds
+    
+    @ti.kernel
+    def test_delta(self):
+        s = ti.cast(0.0, float)
+        for i in range(-2, 2):
+            for j in range(-2, 2):
+                s += self.delta(i * self.ds) * self.delta(j * self.ds) * self.ds ** 2
+        print("\sum_{i, j} delta(i, j) ds^2 = ", s)
+        
     def reset(self):
         self.vx.fill(0)
         self.vy.fill(0)
@@ -261,33 +353,6 @@ class ImcompressibleFlowSimulation:
         for i, j in ti.ndrange(self.nx, self.ny):
             image[i, j] = 0.25 * (self.vorticity[i, j] + self.vorticity[i+1, j] 
                                   + self.vorticity[i, j+1] + self.vorticity[i+1, j+1])
-    
-    @ti.kernel
-    def test_sample(self):
-        period = self.Lx / 6
-        for I in ti.grouped(self.vx):
-            center = ti.Vector([self.dx * I[0], self.dy * I[1] + 0.5 * self.dy])
-            radius = (center - ti.Vector([0, 0])).norm()
-            value = ti.sin(2 * np.pi * radius / period)
-            self.vx[I] = value
-        
-        for I in ti.grouped(self.vy):
-            center = ti.Vector([self.dx * I[0] + 0.5 * self.dx, self.dy * I[1]])
-            radius = (center - ti.Vector([0, 0])).norm()
-            value = ti.sin(2 * np.pi * radius / period)
-            self.vy[I] = value
-        
-        for I in ti.grouped(self.pressure):
-            center = ti.Vector([self.dx * I[0] + 0.5 * self.dx, self.dy * I[1] + 0.5 * self.dy])
-            radius = (center - ti.Vector([0, 0])).norm()
-            value = ti.sin(2 * np.pi * radius / period)
-            self.pressure[I] = value
-        
-        for I in ti.grouped(self.vorticity):
-            center = ti.Vector([self.dx * I[0], self.dy * I[1]])
-            radius = (center - ti.Vector([0, 0])).norm()
-            value = ti.sin(2 * np.pi * radius / period)
-            self.vorticity[I] = value
     
     @ti.kernel
     def compute_gradp(self):
@@ -486,16 +551,18 @@ class ImcompressibleFlowSimulation:
         advection_rhs = ti.ndarray(float, shape=(self.num_vel_dof[None]))
         advection_rhs.fill(0.0)
         self.fill_advection_rhs(advection_rhs)
-        v = conjugate_gradient(self.Lv, advection_rhs, self.Lv_diag, 1e-3, self.num_vel_dof[None])
+        v = conjugate_gradient(self.Lv, advection_rhs, self.Lv_diag, 1e-5, self.num_vel_dof[None])
         self.assign_velocity(v)
         self.compute_div_v()
         pressure_rhs = ti.ndarray(float, shape=(self.num_pressure_dof[None]))
         pressure_rhs.fill(0.0)
         self.fill_pressure_rhs(pressure_rhs)
-        p = conjugate_gradient(self.Lp, pressure_rhs, self.Lp_diag, 1e-3, self.num_pressure_dof[None], True)
+        p = conjugate_gradient(self.Lp, pressure_rhs, self.Lp_diag, 1e-5, self.num_pressure_dof[None], True)
         self.assign_pressure(p)
         self.compute_gradp()
         self.update_velocity()
+        self.compute_div_v()
+        print(self.divergence_error())
         
 
     @ti.kernel
@@ -549,12 +616,12 @@ class ImcompressibleFlowSimulation:
             
 
 if __name__ == '__main__':
-    default_fp = ti.f32
-    ti.init(default_fp=default_fp, arch=ti.cuda, kernel_profiler=True)
+    default_fp = ti.f64
+    ti.init(default_fp=default_fp, arch=ti.cpu, kernel_profiler=True)
     dt = 0.01
     frame_dt = 0.1
     Re = 1000
-    simulator = ImcompressibleFlowSimulation(1, 1, 200, 200, 1/Re, dt = dt, dtype=default_fp)
+    simulator = ImcompressibleFlowSimulation(1, 1, 100, 100, 1/Re, dt = dt, dtype=default_fp)
     simulator.set_wall_vel(np.array([0.,0.]), np.array([0.,0.]), np.array([0.,0.]), np.array([1.,0.]))
     pos = ti.Vector.ndarray(3, float, 10000)
     pos_data = np.random.rand(10000, 3)
@@ -567,18 +634,18 @@ if __name__ == '__main__':
             simulator.substep()
             simulator.advect_particles(pos)
         print("frame {} done".format(f+1))
-        write_ply(f'results_{Re}/{f+1}.ply', pos)
-        simulator.compute_vorticity()
-        image = np.zeros((simulator.nx, simulator.ny))
-        simulator.visualize_vorticity(image)
-        image = image.transpose(1, 0)
-        plt.clf()
-        plt.imshow(image, cmap='jet', vmin=-3., vmax=5.)
-        # set color from blue to red
+        # write_ply(f'results_{Re}/{f+1}.ply', pos)
+        # simulator.compute_vorticity()
+        # image = np.zeros((simulator.nx, simulator.ny))
+        # simulator.visualize_vorticity(image)
+        # image = image.transpose(1, 0)
+        # plt.clf()
+        # plt.imshow(image, cmap='jet', vmin=-3., vmax=5.)
+        # # set color from blue to red
 
-        plt.gca().invert_yaxis()
-        plt.colorbar()
-        plt.savefig(f'results_{Re}/{f+1}.png', bbox_inches='tight')
+        # plt.gca().invert_yaxis()
+        # plt.colorbar()
+        # plt.savefig(f'results_{Re}/{f+1}.png', bbox_inches='tight')
     
 
     
