@@ -763,42 +763,94 @@ class ImcompressibleFlowSimulation:
 
 
 if __name__ == '__main__':
-    dt = 0.002
-    frame_dt = 0.1
-    Re = 1000
-    simulator = ImcompressibleFlowSimulation(1, 1, 256, 256, 1/Re, dt = dt)
-    simulator.set_wall_vel(np.array([0.,0.]), np.array([0.,0.]), np.array([0.,0.]), np.array([1.,0.]))
-    simulator.cg_tol = 1e-3
-    radius = 0.1
-    center = np.array([0.7, 0.5])
-    simulator.add_circle(center, radius, np.array([0., 0.]))
-    simulator.construct_matrices()
-    pos_data = np.random.rand(10000, 3)
-    pos_data[:, 2] = 0
-    outside_circle = np.linalg.norm(pos_data[:, :2] - center, axis=1) > radius
-    pos_data = pos_data[outside_circle]
-    pos = ti.Vector.ndarray(3, float, pos_data.shape[0])
-    pos.from_numpy(pos_data)
-    import os
-    base_folder = f'results/FSI_{Re}'
-    os.makedirs(base_folder, exist_ok=True)
-    for f in range(200):
-        for i in range(int(frame_dt / simulator.dt)):
-            simulator.substep()
-            simulator.advect_particles(pos)
-        print("frame {} done".format(f+1))
-        write_ply(f'{base_folder}/{f+1}.ply', pos)
-        simulator.compute_vorticity()
-        image = np.zeros((simulator.nx, simulator.ny))
-        simulator.visualize_vorticity(image)
-        image = image.transpose(1, 0)
-        mean = np.mean(image)
-        std = np.std(image)
-        image[image > mean + 0.5 * std] = mean + 0.5 * std
-        image[image < mean - 0.5 * std] = mean - 0.5 * std
-        plt.clf()
-        plt.imshow(image, cmap='jet')
-        # set color from blue to red
-        plt.gca().invert_yaxis()
-        plt.colorbar()
-        plt.savefig(f'{base_folder}/vorticity_{f+1}.png', bbox_inches='tight')
+    torch.set_default_device('cuda:0')
+    torch.set_default_dtype(torch.float64)
+    ti.init(arch=ti.cuda, default_fp=ti.f64, device_memory_fraction=0.7)
+    
+    import sys
+    testcase = int(sys.argv[1])
+
+    torch.random.manual_seed(0)
+    
+    if testcase == 1:
+        dt = 0.002
+        frame_dt = 0.1
+        Re = 1000
+        simulator = ImcompressibleFlowSimulation(1, 1, 256, 256, 1/Re, dt = dt)
+        simulator.set_wall_vel(np.array([0.,0.]), np.array([0.,0.]), np.array([0.,0.]), np.array([1.,0.]))
+        simulator.cg_tol = 1e-3
+        radius = 0.1
+        center = np.array([0.7, 0.5])
+        simulator.add_circle(center, radius, np.array([0., 0.]))
+        simulator.construct_matrices()
+        pos_data = np.random.rand(10000, 3)
+        pos_data[:, 2] = 0
+        outside_circle = np.linalg.norm(pos_data[:, :2] - center, axis=1) > radius
+        pos_data = pos_data[outside_circle]
+        pos = ti.Vector.ndarray(3, float, pos_data.shape[0])
+        pos.from_numpy(pos_data)
+        import os
+        base_folder = f'results/FSI_{Re}'
+        os.makedirs(base_folder, exist_ok=True)
+        for f in range(200):
+            for i in range(int(frame_dt / simulator.dt)):
+                simulator.substep()
+                simulator.advect_particles(pos)
+            print("frame {} done".format(f+1))
+            write_ply(f'{base_folder}/{f+1}.ply', pos)
+            simulator.compute_vorticity()
+            image = np.zeros((simulator.nx, simulator.ny))
+            simulator.visualize_vorticity(image)
+            image = image.transpose(1, 0)
+            mean = np.mean(image)
+            std = np.std(image)
+            image[image > mean + 0.5 * std] = mean + 0.5 * std
+            image[image < mean - 0.5 * std] = mean - 0.5 * std
+            plt.clf()
+            plt.imshow(image, cmap='jet')
+            # set color from blue to red
+            plt.gca().invert_yaxis()
+            plt.colorbar()
+            plt.savefig(f'{base_folder}/vorticity_{f+1}.png', bbox_inches='tight')
+    
+    elif testcase == 2:
+        dt = 0.002
+        frame_dt = 0.1
+        Re = 1000
+        simulator = ImcompressibleFlowSimulation(2, 1, 256, 128, 1/Re, dt = dt)
+        simulator.set_wall_vel(np.array([0.5, 0.]), np.array([0.5,0.]), np.array([0.5,0.]), np.array([0.5,0.]))
+        simulator.cg_tol = 1e-3
+        radius = 0.2
+        center = np.array([0.7, 0.5])
+        simulator.add_circle(center, radius, np.array([0., 0.]))
+        simulator.construct_matrices()
+        pos_data = np.random.rand(20000, 3)
+        pos_data[:, 2] = 0
+        pos_data[10000:, 0] += 1
+        outside_circle = np.linalg.norm(pos_data[:, :2] - center, axis=1) > radius
+        pos_data = pos_data[outside_circle]
+        pos = ti.Vector.ndarray(3, float, pos_data.shape[0])
+        pos.from_numpy(pos_data)
+        import os
+        base_folder = f'results/channel_{Re}'
+        os.makedirs(base_folder, exist_ok=True)
+        for f in range(200):
+            for i in range(int(frame_dt / simulator.dt)):
+                simulator.substep()
+                simulator.advect_particles(pos)
+            print("frame {} done".format(f+1))
+            write_ply(f'{base_folder}/{f+1}.ply', pos)
+            simulator.compute_vorticity()
+            image = np.zeros((simulator.nx, simulator.ny))
+            simulator.visualize_vorticity(image)
+            image = image.transpose(1, 0)
+            mean = np.mean(image)
+            std = np.std(image)
+            image[image > mean + 1 * std] = mean + 1 * std
+            image[image < mean - 1 * std] = mean - 1 * std
+            plt.clf()
+            plt.imshow(image, cmap='jet')
+            # set color from blue to red
+            plt.gca().invert_yaxis()
+            plt.colorbar()
+            plt.savefig(f'{base_folder}/vorticity_{f+1}.png', bbox_inches='tight')

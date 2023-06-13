@@ -2,7 +2,6 @@ import taichi as ti
 import numpy as np
 from fluid_simulator import ImcompressibleFlowSimulation
 
-
 mx = 2
 my = 4
 
