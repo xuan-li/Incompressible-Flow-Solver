@@ -1,11 +1,40 @@
 import taichi as ti
 import numpy as np
-from conjugate_gradient import conjugate_gradient
 import matplotlib.pyplot as plt
 import torch
-from scipy.sparse import csr_matrix
-from scipy.io import mmwrite
-from io import BytesIO
+
+def conjugate_gradient(A, b, diag, tol, max_iter, translation_invariant=False):
+    # diagonal preconditioned
+    x = torch.zeros(A.shape[0])
+    r = b - A @ x
+    if translation_invariant:
+        r[0] = 0
+    r_norm = torch.dot(r, r) ** 0.5
+    if r_norm < 1e-10:
+        # print(f'CG converged in 0 iterations.')
+        return x
+    q = r / diag
+    p = q.clone()
+    tol = tol * r_norm
+    rq = torch.dot(r, q)
+    for i in range(max_iter):
+        r_norm = torch.dot(r, r) ** 0.5
+        if r_norm < tol:
+            # print(f'CG converged in {i} iterations.')
+            break
+        Ap = A @ p
+        if translation_invariant:
+            Ap[0] = 0
+        alpha = rq / torch.dot(p, Ap)
+        x += alpha * p
+        r -= alpha * Ap
+        q = r / diag
+        rq_prev = rq
+        rq = torch.dot(r,q)
+        beta = rq / rq_prev
+        p = q + beta * p
+    
+    return x
 
 def write_ply(fn, pos):
     pos_data = pos.to_numpy()
@@ -90,6 +119,45 @@ class ImcompressibleFlowSimulation:
         self.Q_triplets_num = ti.field(dtype=int, shape=())
         self.matrix_triplets_layout = ti.root.dynamic(ti.i, 2 ** 30, chunk_size=1024)
         self.matrix_triplets_layout.place(self.L_I, self.L_J, self.L_V, self.Q_I, self.Q_J, self.Q_V)
+        
+        self.cg_tol = 1e-3
+
+    @ti.kernel
+    def add_box(self, min_corner_:ti.types.ndarray(), max_corner_:ti.types.ndarray(), vel_:ti.types.ndarray()):
+        min_corner = ti.Vector([min_corner_[0], min_corner_[1]])
+        max_corner = ti.Vector([max_corner_[0], max_corner_[1]])
+        vel = ti.Vector([vel_[0], vel_[1]])
+        bbox = max_corner - min_corner
+        for i in range(bbox[0] // self.ds):
+            p = ti.Vector([min_corner[0] + (i + 0.5) * self.ds, min_corner[1]])
+            idx = ti.atomic_add(self.num_surface_constraints[None], 1)
+            self.surface_loc[idx] = p
+            self.surface_vel[idx] = vel
+            p = ti.Vector([min_corner[0] + (i + 0.5) * self.ds, max_corner[1]])
+            idx = ti.atomic_add(self.num_surface_constraints[None], 1)
+            self.surface_loc[idx] = p
+            self.surface_vel[idx] = vel
+        for i in range(bbox[1] // self.ds):
+            p = ti.Vector([min_corner[0], min_corner[1] + (i + 0.5) * self.ds])
+            idx = ti.atomic_add(self.num_surface_constraints[None], 1)
+            self.surface_loc[idx] = p
+            self.surface_vel[idx] = vel
+            p = ti.Vector([max_corner[0], min_corner[1] + (i + 0.5) * self.ds])
+            idx = ti.atomic_add(self.num_surface_constraints[None], 1)
+            self.surface_loc[idx] = p
+            self.surface_vel[idx] = vel
+    
+    @ti.kernel
+    def add_circle(self, center_:ti.types.ndarray(), radius:float, vel_:ti.types.ndarray()):
+        center = ti.Vector([center_[0], center_[1]])
+        vel = ti.Vector([vel_[0], vel_[1]])
+        n_seg = int(2 * np.pi * radius // self.ds)
+        dtheta = 2 * np.pi / n_seg
+        for i in range(n_seg):
+            p = ti.Vector([center[0] + radius * ti.cos(dtheta * i), center[1] + radius * ti.sin(dtheta * i)])
+            idx = ti.atomic_add(self.num_surface_constraints[None], 1)
+            self.surface_loc[idx] = p
+            self.surface_vel[idx] = vel
 
     @ti.kernel
     def L_triplets_to_torch(self, I:ti.types.ndarray(), J:ti.types.ndarray(), V:ti.types.ndarray()):
@@ -113,7 +181,7 @@ class ImcompressibleFlowSimulation:
         J = torch.zeros(self.L_triplets_num[None], dtype=torch.long)
         V = torch.zeros(self.L_triplets_num[None])
         self.L_triplets_to_torch(I, J, V)
-        L = torch.sparse_coo_tensor(torch.stack([I, J]), V, (self.num_vel_dof[None], self.num_vel_dof[None]))
+        L = self.L = torch.sparse_coo_tensor(torch.stack([I, J]), V, (self.num_vel_dof[None], self.num_vel_dof[None]))
         
         self.fill_Q_matrix()
         I = torch.zeros(self.Q_triplets_num[None], dtype=torch.long)
@@ -131,6 +199,7 @@ class ImcompressibleFlowSimulation:
         self.R_inv = Identity + self.nu * self.dt * 0.5 * L + ((0.5 * self.dt * self.nu) ** 2) * (L @ L)
         
         self.A = self.Q.T @ self.R_inv @ self.Q
+
         self.R_diag = torch.zeros(self.R.shape[0])
         for i in range(self.R.shape[0]):
             self.R_diag[i] = self.R[i, i]
@@ -221,7 +290,7 @@ class ImcompressibleFlowSimulation:
                 self.L_I[idx] = self.vy_id[I]
                 self.L_J[idx] = self.vy_id[I[0], I[1]+1]
                 self.L_V[idx] = 1 / self.dy ** 2
-    
+
     @ti.kernel
     def fill_Q_matrix(self):
         # [G, H]
@@ -256,19 +325,19 @@ class ImcompressibleFlowSimulation:
         
         for p in range(self.num_surface_constraints[None]):
             xi = self.surface_loc[p]
-            rel_pos = ti.Vector([xi[0] / self.dx, xi[1] / self.dy - 0.5]).cast(int)
+            rel_pos = ti.Vector([xi[0] / self.dx, xi[1] / self.dy - 0.5])
             base = ti.floor(rel_pos - 0.5).cast(int)
             for i in ti.static(range(3)):
                 for j in ti.static(range(3)):
                     offset = ti.Vector([i, j])
-                    fx = rel_pos -(base + offset)
+                    fx = rel_pos - (base + offset)
                     weight = self.weight(fx[0]) * self.weight(fx[1])
                     idx = ti.atomic_add(self.Q_triplets_num[None], 1)
                     self.Q_I[idx] = self.vx_id[base + offset]
                     self.Q_J[idx] = self.num_pressure_dof[None] + p * 2
                     self.Q_V[idx] = weight
 
-            rel_pos = ti.Vector([xi[0] / self.dx - 0.5, xi[1] / self.dy]).cast(int)
+            rel_pos = ti.Vector([xi[0] / self.dx - 0.5, xi[1] / self.dy])
             base = ti.floor(rel_pos - 0.5).cast(int)
             for i in ti.static(range(3)):
                 for j in ti.static(range(3)):
@@ -438,7 +507,7 @@ class ImcompressibleFlowSimulation:
         for p in range(self.num_surface_constraints[None]):
             self.Eu[p] = ti.Vector([0.0, 0.0])
             xi = self.surface_loc[p]
-            rel_pos = ti.Vector([xi[0] / self.dx, xi[1] / self.dy - 0.5]).cast(int)
+            rel_pos = ti.Vector([xi[0] / self.dx, xi[1] / self.dy - 0.5])
             base = ti.floor(rel_pos - 0.5).cast(int)
             for i in ti.static(range(3)):
                 for j in ti.static(range(3)):
@@ -446,7 +515,7 @@ class ImcompressibleFlowSimulation:
                     fx = rel_pos - (base + offset)
                     weight = self.weight(fx[0]) * self.weight(fx[1])
                     self.Eu[p][0] += weight * self.vx[base + offset]
-            rel_pos = ti.Vector([xi[0] / self.dx - 0.5, xi[1] / self.dy]).cast(int)
+            rel_pos = ti.Vector([xi[0] / self.dx - 0.5, xi[1] / self.dy])
             base = ti.floor(rel_pos - 0.5).cast(int)
             for i in ti.static(range(3)):
                 for j in ti.static(range(3)):
@@ -594,6 +663,13 @@ class ImcompressibleFlowSimulation:
             self.vy[I] = v[self.vy_id[I]]
     
     @ti.kernel
+    def get_velocity(self, v:ti.types.ndarray()):
+        for I in ti.grouped(self.vx):
+            v[self.vx_id[I]] = self.vx[I]
+        for I in ti.grouped(self.vy):
+            v[self.vy_id[I]] = self.vy[I]
+    
+    @ti.kernel
     def update_velocity(self, du:ti.types.ndarray()):
         for I in ti.grouped(self.vx):
             if I[0] == 0 or I[0] == self.nx:
@@ -617,92 +693,65 @@ class ImcompressibleFlowSimulation:
         self.compute_laplacian_v()
         r1 = torch.zeros(self.num_vel_dof[None])
         self.fill_r1(r1)
-        v = conjugate_gradient(self.R, r1, self.R_diag, 1e-5, self.R.shape[0])
+        v = conjugate_gradient(self.R, r1, self.R_diag, self.cg_tol, self.R.shape[0])
         r2 = torch.zeros(self.num_pressure_dof[None] + self.num_surface_constraints[None] * 2)
         self.fill_r2(r2)
         rhs = self.Q.T @ v - r2
-        lam = conjugate_gradient(self.A, rhs, self.A_diag, 1e-5, self.A.shape[0], True)
-        v -= self.R_inv @ (self.Q @ lam)
-        self.assign_velocity(v)
-        self.compute_div_v()
+        lam = conjugate_gradient(self.A, rhs, self.A_diag, self.cg_tol, self.A.shape[0], True)
+        new_v = v - self.R_inv @ (self.Q @ lam)
+        self.assign_velocity(new_v)
+    
+    @ti.kernel
+    def interpolated_velocity(self, pos: ti.types.ndarray(), vel: ti.types.ndarray()):
+        pos_vec = ti.Vector([pos[0], pos[1]])
+        vel_vec = self._interpolated_velocity(pos_vec)
+        vel[0] = vel_vec[0]
+        vel[1] = vel_vec[1]
 
-    # @ti.kernel
-    # def advect_particles(self, pos: ti.types.ndarray()):
-    #     for p in range(pos.shape[0]):
-    #         xi = pos[p]
-            
-    #         rel_pos = ti.Vector([xi[0] / self.dx, xi[1] / self.dy - 0.5]).cast(int)
-    #         base = ti.floor(rel_pos - 0.5).cast(int)
-    #         vx = ti.cast(0.0, float)
-    #         for i in ti.static(range(3)):
-    #             for j in ti.static(range(3)):
-    #                 offset = ti.Vector([i, j])
-    #                 fx = rel_pos - (base + offset)
-    #                 weight = self.weight(fx[0]) * self.weight(fx[1])
-    #                 vx += weight * self.vx[base + offset]
-            
-    #         rel_pos = ti.Vector([xi[0] / self.dx - 0.5, xi[1] / self.dy]).cast(int)
-    #         base = ti.floor(rel_pos - 0.5).cast(int)
-    #         vy = ti.cast(0.0, float)
-    #         for i in ti.static(range(3)):
-    #             for j in ti.static(range(3)):
-    #                 offset = ti.Vector([i, j])
-    #                 fx = rel_pos - (base + offset)
-    #                 weight = self.weight(fx[0]) * self.weight(fx[1])
-    #                 vy += weight * self.vy[base + offset]
+    @ti.func
+    def _interpolated_velocity(self, pos):
+        x = ti.Vector([pos[0]/ self.dx, pos[1]/ self.dy])
+        I00 = ti.floor(ti.Vector([x[0], x[1] - 0.5])).cast(int)
+        I01 = I00 + ti.Vector([0, 1])
+        I10 = I00 + ti.Vector([1, 0])
+        I11 = I00 + ti.Vector([1, 1])
+        base = ti.Vector([I00[0], I00[1]+0.5])
+        v00 = 2 * self.vB[None][0] - self.vx[I00[0], 0]
+        v10 = 2 * self.vB[None][0] - self.vx[I10[0], 0]
+        if I00[1] != -1:
+            v00 = self.vx[I00]
+            v10 = self.vx[I10]
+        v01 = 2 * self.vT[None][0] - self.vx[I01[0], self.ny - 1]
+        v11 = 2 * self.vT[None][0] - self.vx[I11[0], self.ny - 1]
+        if I01[1] != self.ny:
+            v01 = self.vx[I01]
+            v11 = self.vx[I11]
+        vx = bilerp(x - base, v00, v10, v01, v11)
 
-    #         pos[p][0] += self.dt * vx
-    #         pos[p][1] += self.dt * vy
-    #         if pos[p][0] < 0:
-    #             pos[p][0] += self.Lx
-    #         elif pos[p][0] >= self.Lx:
-    #             pos[p][0] -= self.Lx
-    #         if pos[p][1] < 0:
-    #             pos[p][1] += self.Ly
-    #         elif pos[p][1] >= self.Ly:
-    #             pos[p][1] -= self.Ly
-
+        I00 = ti.floor(ti.Vector([x[0] - 0.5, x[1]])).cast(int)
+        I01 = I00 + ti.Vector([0, 1])
+        I10 = I00 + ti.Vector([1, 0])
+        I11 = I00 + ti.Vector([1, 1])
+        base = ti.Vector([I00[0] + 0.5, I00[1]])
+        v00 = 2 * self.vL[None][1] - self.vy[0, I00[1]]
+        v01 = 2 * self.vL[None][1] - self.vy[0, I01[1]]
+        if I00[0] != -1:
+            v00 = self.vy[I00]
+            v01 = self.vy[I01]
+        v10 = 2 * self.vR[None][1] - self.vy[self.nx - 1, I10[1]]
+        v11 = 2 * self.vR[None][1] - self.vy[self.nx - 1, I11[1]]
+        if I10[0] != self.nx:
+            v10 = self.vy[I10]
+            v11 = self.vy[I11]
+        vy = bilerp(x - base, v00, v10, v01, v11)
+        return ti.Vector([vx, vy])
 
     @ti.kernel
     def advect_particles(self, pos: ti.types.ndarray()):
         for p in range(pos.shape[0]):
-            x = ti.Vector([pos[p][0]/ self.dx, pos[p][1]/ self.dy])
-            I00 = ti.floor(ti.Vector([x[0], x[1] - 0.5])).cast(int)
-            I01 = I00 + ti.Vector([0, 1])
-            I10 = I00 + ti.Vector([1, 0])
-            I11 = I00 + ti.Vector([1, 1])
-            base = ti.Vector([I00[0], I00[1]+0.5])
-            v00 = 2 * self.vB[None][0] - self.vx[I00[0], 0]
-            v10 = 2 * self.vB[None][0] - self.vx[I10[0], 0]
-            if I00[1] != -1:
-                v00 = self.vx[I00]
-                v10 = self.vx[I10]
-            v01 = 2 * self.vT[None][0] - self.vx[I01[0], self.ny - 1]
-            v11 = 2 * self.vT[None][0] - self.vx[I11[0], self.ny - 1]
-            if I01[1] != self.ny:
-                v01 = self.vx[I01]
-                v11 = self.vx[I11]
-            vx = bilerp(x - base, v00, v10, v01, v11)
-
-            I00 = ti.floor(ti.Vector([x[0] - 0.5, x[1]])).cast(int)
-            I01 = I00 + ti.Vector([0, 1])
-            I10 = I00 + ti.Vector([1, 0])
-            I11 = I00 + ti.Vector([1, 1])
-            base = ti.Vector([I00[0] + 0.5, I00[1]])
-            v00 = 2 * self.vL[None][1] - self.vy[0, I00[1]]
-            v01 = 2 * self.vL[None][1] - self.vy[0, I01[1]]
-            if I00[0] != -1:
-                v00 = self.vy[I00]
-                v01 = self.vy[I01]
-            v10 = 2 * self.vR[None][1] - self.vy[self.nx - 1, I10[1]]
-            v11 = 2 * self.vR[None][1] - self.vy[self.nx - 1, I11[1]]
-            if I10[0] != self.nx:
-                v10 = self.vy[I10]
-                v11 = self.vy[I11]
-            vy = bilerp(x - base, v00, v10, v01, v11)
-
-            pos[p][0] += self.dt * vx
-            pos[p][1] += self.dt * vy
+            v = self._interpolated_velocity(ti.Vector([pos[p][0], pos[p][1]]))
+            pos[p][0] += self.dt * v[0]
+            pos[p][1] += self.dt * v[1]
             if pos[p][0] < 0:
                 pos[p][0] += self.Lx
             elif pos[p][0] >= self.Lx:
@@ -711,43 +760,45 @@ class ImcompressibleFlowSimulation:
                 pos[p][1] += self.Ly
             elif pos[p][1] >= self.Ly:
                 pos[p][1] -= self.Ly
-            
+
 
 if __name__ == '__main__':
-    torch.set_default_dtype(torch.float64)
-    torch.set_default_device('cuda:0')
-    ti.init(default_fp=ti.f64, arch=ti.cuda)
-    dt = 0.005
+    dt = 0.002
     frame_dt = 0.1
     Re = 1000
-    simulator = ImcompressibleFlowSimulation(1, 1, 100, 100, 1/Re, dt = dt)
+    simulator = ImcompressibleFlowSimulation(1, 1, 256, 256, 1/Re, dt = dt)
     simulator.set_wall_vel(np.array([0.,0.]), np.array([0.,0.]), np.array([0.,0.]), np.array([1.,0.]))
-    simulator.compute_advection()
+    simulator.cg_tol = 1e-3
+    radius = 0.1
+    center = np.array([0.7, 0.5])
+    simulator.add_circle(center, radius, np.array([0., 0.]))
     simulator.construct_matrices()
-    pos = ti.Vector.ndarray(3, float, 10000)
     pos_data = np.random.rand(10000, 3)
     pos_data[:, 2] = 0
+    outside_circle = np.linalg.norm(pos_data[:, :2] - center, axis=1) > radius
+    pos_data = pos_data[outside_circle]
+    pos = ti.Vector.ndarray(3, float, pos_data.shape[0])
     pos.from_numpy(pos_data)
     import os
-    os.makedirs(f'results_{Re}', exist_ok=True)
-    for f in range(500):
-        for i in range(int(frame_dt/ simulator.dt)):
+    base_folder = f'results/FSI_{Re}'
+    os.makedirs(base_folder, exist_ok=True)
+    for f in range(200):
+        for i in range(int(frame_dt / simulator.dt)):
             simulator.substep()
             simulator.advect_particles(pos)
         print("frame {} done".format(f+1))
-        write_ply(f'results_{Re}/{f+1}.ply', pos)
+        write_ply(f'{base_folder}/{f+1}.ply', pos)
         simulator.compute_vorticity()
         image = np.zeros((simulator.nx, simulator.ny))
         simulator.visualize_vorticity(image)
         image = image.transpose(1, 0)
+        mean = np.mean(image)
+        std = np.std(image)
+        image[image > mean + 0.5 * std] = mean + 0.5 * std
+        image[image < mean - 0.5 * std] = mean - 0.5 * std
         plt.clf()
-        plt.imshow(image, cmap='jet', vmin=-3., vmax=5.)
+        plt.imshow(image, cmap='jet')
         # set color from blue to red
-
         plt.gca().invert_yaxis()
         plt.colorbar()
-        plt.savefig(f'results_{Re}/{f+1}.png', bbox_inches='tight')
-    
-
-    
-
+        plt.savefig(f'{base_folder}/vorticity_{f+1}.png', bbox_inches='tight')

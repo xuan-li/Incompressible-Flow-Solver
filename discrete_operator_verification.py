@@ -1,6 +1,5 @@
 import taichi as ti
 import numpy as np
-
 from fluid_simulator import ImcompressibleFlowSimulation
 
 
@@ -10,9 +9,7 @@ my = 4
 @ti.data_oriented
 class DiscreteOperatorTester():
     def __init__(self, Lx, Ly, nx, ny) -> None:
-        self.simulator = ImcompressibleFlowSimulation(Lx, Ly, nx, ny)
-        self.simulator.reset()
-        self.simulator.set_wall_vel(np.array([0.0, 0.0]), np.array([0.0, 0.0]), np.array([0.0, 0.0]), np.array([0.0, 0.0]))
+        self.simulator = ImcompressibleFlowSimulation(Lx, Ly, nx, ny, 1)
         self.error_gradp_x = ti.field(dtype=float, shape=())
         self.error_gradp_y = ti.field(dtype=float, shape=())
         self.error_div_v = ti.field(dtype=float, shape=())
@@ -77,7 +74,7 @@ class DiscreteOperatorTester():
             x = I[0] * self.simulator.dx + 0.5 * self.simulator.dx
             y = I[1] * self.simulator.dy + 0.5 * self.simulator.dy
             self.simulator.pressure[I] = self.analytical_pressure(x, y)
-        
+    
     @ti.kernel
     def compute_error(self):
         self.error_div_v[None] = 0.0
@@ -112,8 +109,6 @@ class DiscreteOperatorTester():
             y = I[1] * self.simulator.dy + 0.5 * self.simulator.dy
             lap_vec = self.analytical_laplacian_v(x, y)
             self.error_laplacian_vx[None] += (lap_vec[0] - self.simulator.laplacian_vx[I]) ** 2 * self.simulator.dx * self.simulator.dy
-            if (lap_vec[0] - self.simulator.laplacian_vx[I]) ** 2 > 10:
-                print(I, self.simulator.vx[I])
         
         for I in ti.grouped(self.simulator.laplacian_vy):
             if I[1] == 0 or I[1] == self.simulator.ny or I[0] == 0 or I[0] == self.simulator.nx-1:
@@ -137,6 +132,7 @@ class DiscreteOperatorTester():
             y = I[1] * self.simulator.dy
             self.error_advect_vy[None] += (self.analytical_advection(x, y)[1] - self.simulator.advect_vy[I]) ** 2 * self.simulator.dx * self.simulator.dy
 
+        print("dx: ", self.simulator.dx)
         print("Error gradp_x: ", ti.sqrt(self.error_gradp_x[None]))
         print("Error gradp_y: ", ti.sqrt(self.error_gradp_y[None]))
         print("Error div_v: ", ti.sqrt(self.error_div_v[None]))
@@ -146,10 +142,8 @@ class DiscreteOperatorTester():
         print("Error advect_vy: ", ti.sqrt(self.error_advect_vy[None]))
         
 
-
-
 if __name__ == '__main__':
-    ti.init(default_fp=ti.32, arch=ti.cuda, device_memory_fraction=0.7)
+    ti.init(default_fp=ti.f64, arch=ti.cuda)
     import sys
     N = int(sys.argv[1])
     tester = DiscreteOperatorTester(1.0, 1.0, N, N)

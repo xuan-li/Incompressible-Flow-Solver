@@ -6,7 +6,7 @@ from timer import Timer
 import torch
 import taichi as ti
 
-def conjugate_gradient(A, b, diag, tol,max_iter, translation_invariant=False):
+def conjugate_gradient(A, b, diag, tol, max_iter, translation_invariant=False):
     # diagonal preconditioned
     x = torch.zeros(A.shape[0])
     r = b - A @ x
@@ -18,7 +18,7 @@ def conjugate_gradient(A, b, diag, tol,max_iter, translation_invariant=False):
         return x
     q = r / diag
     p = q.clone()
-    tol = min(tol * r_norm, tol)
+    tol = tol * r_norm
     rq = torch.dot(r, q)
     for i in range(max_iter):
         r_norm = torch.dot(r, r) ** 0.5
