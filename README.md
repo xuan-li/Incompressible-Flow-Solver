@@ -8,14 +8,14 @@
 # Demos
 
 ## Lid-driven Cavity Flow
-<div class="container" style="padding-left:0; padding-right:0; padding-top:10px; padding-bottom: 5px; "> 
+<html>
     <video style="box-shadow: 5px 5px 10px #a7a7a7;" width="400" height="225" controls="" poster="https://drive.google.com/uc?export=view&id=15vic8liLS1S-GCi6aMz8f9HAbDaG6L3w" preload="none"> <source src="https://drive.google.com/uc?export=view&id=1iiEMHh3aWWpLO_PuHu5vP12Zvhz3cAMF"> </video>
-</div>
+</html>
 
 ## Channel Flow
-<div class="container" style="padding-left:0; padding-right:0; padding-top:10px; padding-bottom: 5px; "> 
+<html>
     <video style="box-shadow: 5px 5px 10px #a7a7a7;" width="400" height="225" controls="" poster="https://drive.google.com/uc?export=view&id=1uF7A6BL8RMqOAglIxc6W1rN-GbyjvIVo" preload="none"> <source src="https://drive.google.com/uc?export=view&id=1qebuGWDuIolN73edombjiqttBAkvoLgD"> </video>
-</div>
+</html>
 
 
 # Documentation
