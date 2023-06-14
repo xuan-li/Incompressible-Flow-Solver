@@ -3,9 +3,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 
-def conjugate_gradient(A, b, diag, tol, max_iter, translation_invariant=False):
+def conjugate_gradient(A, b, diag, tol, max_iter, translation_invariant=False, x0=None):
     # diagonal preconditioned
-    x = torch.zeros(A.shape[0])
+    if x0 is None:
+        x = torch.zeros(A.shape[0])
+    else:
+        x = x0
     r = b - A @ x
     if translation_invariant:
         r[0] = 0
@@ -121,6 +124,7 @@ class ImcompressibleFlowSimulation:
         self.matrix_triplets_layout.place(self.L_I, self.L_J, self.L_V, self.Q_I, self.Q_J, self.Q_V)
         
         self.cg_tol = 1e-3
+        self.prev_lam = None
 
     @ti.kernel
     def add_box(self, min_corner_:ti.types.ndarray(), max_corner_:ti.types.ndarray(), vel_:ti.types.ndarray()):
@@ -693,11 +697,16 @@ class ImcompressibleFlowSimulation:
         self.compute_laplacian_v()
         r1 = torch.zeros(self.num_vel_dof[None])
         self.fill_r1(r1)
-        v = conjugate_gradient(self.R, r1, self.R_diag, self.cg_tol, self.R.shape[0])
+        v0 = torch.zeros(self.num_vel_dof[None])
+        self.get_velocity(v0)
+        v = conjugate_gradient(self.R, r1, self.R_diag, self.cg_tol, self.R.shape[0], x0 = v0)
         r2 = torch.zeros(self.num_pressure_dof[None] + self.num_surface_constraints[None] * 2)
         self.fill_r2(r2)
         rhs = self.Q.T @ v - r2
-        lam = conjugate_gradient(self.A, rhs, self.A_diag, self.cg_tol, self.A.shape[0], True)
+        if self.prev_lam is None:
+            self.prev_lam = torch.zeros(self.num_pressure_dof[None] + self.num_surface_constraints[None] * 2)
+        lam = conjugate_gradient(self.A, rhs, self.A_diag, self.cg_tol, self.A.shape[0], True, x0=self.prev_lam)
+        self.prev_lam = lam
         new_v = v - self.R_inv @ (self.Q @ lam)
         self.assign_velocity(new_v)
     
@@ -778,7 +787,7 @@ if __name__ == '__main__':
         Re = 1000
         simulator = ImcompressibleFlowSimulation(1, 1, 256, 256, 1/Re, dt = dt)
         simulator.set_wall_vel(np.array([0.,0.]), np.array([0.,0.]), np.array([0.,0.]), np.array([1.,0.]))
-        simulator.cg_tol = 1e-3
+        simulator.cg_tol = 1e-2
         radius = 0.1
         center = np.array([0.7, 0.5])
         simulator.add_circle(center, radius, np.array([0., 0.]))
@@ -814,11 +823,11 @@ if __name__ == '__main__':
             plt.savefig(f'{base_folder}/vorticity_{f+1}.png', bbox_inches='tight')
     
     elif testcase == 2:
-        dt = 0.002
-        frame_dt = 0.1
-        Re = 1000
+        dt = 0.0002
+        frame_dt = 0.04
+        Re = 5000
         simulator = ImcompressibleFlowSimulation(2, 1, 256, 128, 1/Re, dt = dt)
-        simulator.set_wall_vel(np.array([0.5, 0.]), np.array([0.5,0.]), np.array([0.5,0.]), np.array([0.5,0.]))
+        simulator.set_wall_vel(np.array([1, 0.]), np.array([1,0.]), np.array([0,0.]), np.array([0,0.]))
         simulator.cg_tol = 1e-3
         radius = 0.2
         center = np.array([0.7, 0.5])
@@ -832,7 +841,7 @@ if __name__ == '__main__':
         pos = ti.Vector.ndarray(3, float, pos_data.shape[0])
         pos.from_numpy(pos_data)
         import os
-        base_folder = f'results/channel_{Re}'
+        base_folder = f'results/channel_{Re}_vel1'
         os.makedirs(base_folder, exist_ok=True)
         for f in range(200):
             for i in range(int(frame_dt / simulator.dt)):
