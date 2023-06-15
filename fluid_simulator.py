@@ -823,12 +823,12 @@ if __name__ == '__main__':
             plt.savefig(f'{base_folder}/vorticity_{f+1}.png', bbox_inches='tight')
     
     elif testcase == 2:
-        dt = 0.0002
+        dt = 0.0001
         frame_dt = 0.04
         Re = 5000
         simulator = ImcompressibleFlowSimulation(2, 1, 256, 128, 1/Re, dt = dt)
         simulator.set_wall_vel(np.array([1, 0.]), np.array([1,0.]), np.array([0,0.]), np.array([0,0.]))
-        simulator.cg_tol = 1e-3
+        simulator.cg_tol = 1e-2
         radius = 0.2
         center = np.array([0.7, 0.5])
         simulator.add_circle(center, radius, np.array([0., 0.]))
@@ -843,7 +843,7 @@ if __name__ == '__main__':
         import os
         base_folder = f'results/channel_{Re}_vel1'
         os.makedirs(base_folder, exist_ok=True)
-        for f in range(200):
+        for f in range(500):
             for i in range(int(frame_dt / simulator.dt)):
                 simulator.substep()
                 simulator.advect_particles(pos)
